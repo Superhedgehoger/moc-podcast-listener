@@ -8,6 +8,15 @@ MOC Podcast Listener is a local-first skill for resolving podcast episodes,
 transcribing audio, archiving rich Show Notes, and preparing evidence for an
 agent-generated summary.
 
+Podcast audio is difficult to search and quote, while images and links in Show
+Notes can disappear over time. Give this skill an episode URL and it produces a
+durable, reusable research package: a source-linked timestamped transcript,
+SRT subtitles, structured segments, archived Show Notes and media, and clean
+evidence for agent-assisted synthesis. It is useful for personal knowledge
+management, editorial research, interview citation, accessibility workflows,
+and anyone who wants the value of a long-form episode without repeatedly
+scrubbing through the audio or organizing files by hand.
+
 The scripts perform deterministic operations:
 
 1. Resolve an episode URL, RSS item, or search query.

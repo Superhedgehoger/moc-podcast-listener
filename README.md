@@ -8,6 +8,17 @@ timestamped transcripts, and durable Show Notes archiving.
 一个本地优先的播客处理 Skill：解析单集、转录音频、生成时间戳转录稿，并完整归档
 Show Notes 的文字、链接与图片。
 
+Give it an episode link and it turns a piece of audio into a reusable research
+package: a source-linked transcript, timestamp data, subtitles, archived Show
+Notes, and clean inputs for an evidence-backed summary. It is practical for
+people who listen to long-form podcasts but need to search, quote, review, or
+preserve what they heard without repeatedly scrubbing through the audio.
+
+只需提供一个播客链接，它就能把音频整理成可长期使用的资料包：包含原始来源、
+带时间戳的转录稿、字幕、Show Notes 图文归档，以及可供 Agent 总结的可靠输入。
+它适合经常听长播客、需要检索观点、核对引述、整理知识或保存节目资料的人，
+能明显减少下载、转录、复制链接和手工归档的重复劳动。
+
 ## 中文简介
 
 MOC Podcast Listener 面向 Codex、OpenClaw 及其他支持 `SKILL.md` 的 Agent。

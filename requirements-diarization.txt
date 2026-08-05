@@ -1,0 +1,2 @@
+# Optional speaker diarization. pyannote.audio 4 requires Python 3.10+.
+pyannote.audio>=4.0

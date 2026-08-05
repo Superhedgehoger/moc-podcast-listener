@@ -1,0 +1,196 @@
+# MOC Podcast Listener
+
+[Home](README.md) | [简体中文](README.zh-CN.md) | **English**
+
+## Overview
+
+MOC Podcast Listener is a local-first skill for resolving podcast episodes,
+transcribing audio, archiving rich Show Notes, and preparing evidence for an
+agent-generated summary.
+
+The scripts perform deterministic operations:
+
+1. Resolve an episode URL, RSS item, or search query.
+2. Extract episode metadata, audio, Show Notes, and speaker candidates.
+3. Download and preprocess audio.
+4. Transcribe with SenseVoice-Small or Whisper.
+5. Write a self-contained timestamped transcript, segments JSON, and SRT.
+6. Archive Show Notes, links, images, and a media manifest.
+7. Produce an agent instruction for evidence-backed synthesis.
+
+The final summary links to the independent transcript instead of embedding a
+second copy of the complete text.
+
+## Supported Sources
+
+- Xiaoyuzhou
+- Apple Podcasts
+- Overcast
+- Spotify
+- Pocket Casts, Castro, and Castbox
+- YouTube and Bilibili
+- NetEase Cloud Music
+- Ximalaya and Lizhi FM
+- Listen Notes, Podbean, and iHeart
+- RSS/XML feeds
+- Show name and episode-title search terms
+
+## Requirements
+
+- Python 3.10+
+- `ffmpeg` and `ffprobe`
+- SenseVoice, faster-whisper, or openai-whisper
+- `yt-dlp` for supported video platforms
+
+Install the complete dependency set:
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+Smaller dependency groups are available in:
+
+- `requirements-base.txt`
+- `requirements-sensevoice.txt`
+- `requirements-whisper.txt`
+- `requirements-storage.txt`
+- `requirements-diarization.txt`
+
+## Usage
+
+Clone the repository:
+
+```bash
+git clone https://github.com/Superhedgehoger/moc-podcast-listener.git
+cd moc-podcast-listener
+```
+
+Run a full episode:
+
+```bash
+python3 podcast-listener.py "EPISODE_URL"
+```
+
+Fast Whisper mode:
+
+```bash
+python3 quick-listen.py --model small "EPISODE_URL"
+```
+
+Utility modes:
+
+```bash
+python3 podcast-listener.py --resolve-only "EPISODE_URL"
+python3 podcast-listener.py --archive-only "EPISODE_URL"
+python3 podcast-listener.py --force-transcribe "EPISODE_URL"
+```
+
+Full runs reuse a transcript only when the episode identity matches and the
+content passes completeness checks.
+
+## Transcript Format
+
+The `_转录稿.txt` file is designed to remain useful outside the original
+workflow:
+
+```text
+# Podcast transcript
+
+- Show
+- Episode
+- Original URL
+- Publication date
+- Duration
+- ASR engine
+- Language
+- Generated time
+
+## Transcript
+
+[00:00:03 - 00:00:16]
+Recognized text...
+
+## Attachments and source
+
+- Original episode URL
+- Segments JSON
+- SRT
+- Metadata
+- Show Notes
+- Media manifest
+
+--- End of transcript ---
+```
+
+Use `_segments.json` as the machine-readable source for precise timestamp
+verification.
+
+## Show Notes Storage
+
+The default `hybrid` mode downloads images while retaining their source URLs.
+
+```bash
+SHOWNOTES_ASSETS=hybrid python3 podcast-listener.py "EPISODE_URL"
+```
+
+Low-cost private storage can use a local sync folder:
+
+```bash
+SHOWNOTES_SYNC_BACKEND=local \
+SHOWNOTES_SYNC_DESTINATION="$HOME/Nutstore Files/Podcast Archive" \
+python3 podcast-listener.py "EPISODE_URL"
+```
+
+WebDAV and S3/R2 are also supported. Credentials are read only from environment
+variables. See [references/storage-and-speakers.md](references/storage-and-speakers.md).
+
+## Optional Speaker Diarization
+
+Install the optional dependencies and enable diarization:
+
+```bash
+python3 -m pip install -r requirements-diarization.txt
+DIARIZATION=1 python3 podcast-listener.py "EPISODE_URL"
+```
+
+The output uses anonymous labels such as `SPEAKER_00`. A real person's identity
+must not be inferred without independent evidence.
+
+## Install as an Agent Skill
+
+Codex:
+
+```bash
+cp -R . "$HOME/.codex/skills/moc-podcast-listener"
+```
+
+OpenClaw:
+
+```bash
+cp -R . "$HOME/.openclaw/workspace/skills/moc-podcast-listener"
+```
+
+Reload the agent after installation.
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+The current suite contains 32 offline regression tests.
+
+## Security
+
+- Do not commit access tokens, WebDAV passwords, cloud credentials, models,
+  audio, or generated podcast artifacts.
+- Show Notes image downloads block private-network targets and enforce content
+  type and size checks.
+- Audio cleanup uses exact paths.
+- Cached transcripts are matched by episode ID or URL and checked for
+  completeness.
+
+## License
+
+No license has been selected. All rights are reserved until a license file is
+added.

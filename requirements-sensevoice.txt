@@ -1,0 +1,6 @@
+# Default Chinese transcription path.
+funasr>=1.1.5
+modelscope>=1.15.0
+torch>=2.0.0
+torchaudio>=2.0.0
+silero-vad>=5.0

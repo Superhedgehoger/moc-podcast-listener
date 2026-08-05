@@ -1,0 +1,14 @@
+{
+  "results": [
+    {
+      "wrapperType": "podcastEpisode",
+      "kind": "podcast-episode",
+      "trackId": 100000000001,
+      "trackName": "Apple Fixture Episode",
+      "collectionName": "Fixture Show",
+      "episodeUrl": "https://cdn.example.com/apple-fixture.mp3",
+      "description": "Apple episode notes",
+      "releaseDate": "2025-01-02T00:00:00Z"
+    }
+  ]
+}

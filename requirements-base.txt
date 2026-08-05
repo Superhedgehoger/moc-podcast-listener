@@ -1,0 +1,2 @@
+# Platform extraction. ffmpeg and ffprobe remain system dependencies.
+yt-dlp>=2025.1.0

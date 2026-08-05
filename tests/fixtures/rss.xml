@@ -1,0 +1,4 @@
+<rss version="2.0"><channel><title>Fixture Show</title>
+<item><title>Fixture Episode One</title><pubDate>Wed, 02 Jan 2025 10:00:00 GMT</pubDate><description><![CDATA[Notes one]]></description><guid>fixture-1</guid><enclosure url="https://cdn.example.com/fixture-1.mp3" type="audio/mpeg"/></item>
+<item><title>Fixture Episode Two</title><pubDate>Thu, 03 Jan 2025 10:00:00 GMT</pubDate><description><![CDATA[Notes two]]></description><guid>fixture-2</guid><enclosure url="https://cdn.example.com/fixture-2.mp3" type="audio/mpeg"/></item>
+</channel></rss>

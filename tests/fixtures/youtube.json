@@ -1,0 +1,12 @@
+{
+  "id": "youtube-fixture",
+  "title": "YouTube Fixture Episode",
+  "uploader": "Fixture Channel",
+  "upload_date": "20250102",
+  "duration": 120,
+  "description": "YouTube notes",
+  "thumbnail": "https://cdn.example.com/youtube.jpg",
+  "formats": [
+    {"format_id": "audio", "vcodec": "none", "acodec": "mp4a.40.2", "abr": 128, "url": "https://cdn.example.com/youtube-fixture.m4a"}
+  ]
+}

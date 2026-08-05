@@ -1,0 +1,4 @@
+interface:
+  display_name: "播客代听助手"
+  short_description: "生成带来源和时间戳的播客转录，归档图文 Show Notes"
+  default_prompt: "Use $moc-podcast-listener to create a traceable timestamped transcript, archive Show Notes, and produce a summary that links to the transcript instead of embedding it."

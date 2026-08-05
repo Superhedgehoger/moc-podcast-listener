@@ -1,0 +1,4 @@
+# Complete installation. Prefer an engine-specific file for a smaller environment.
+-r requirements-base.txt
+-r requirements-sensevoice.txt
+-r requirements-whisper.txt

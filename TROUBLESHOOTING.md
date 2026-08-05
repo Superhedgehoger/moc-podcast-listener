@@ -121,6 +121,6 @@ Agent 必须自查并补充，检查清单：
 ## ❌ 问题：文件写入失败
 
 ```bash
-mkdir -p /Users/djy/Documents/播客总结/{转录稿,音频,总结稿}
-df -h /Users/djy/Documents/    # 检查磁盘空间
+mkdir -p "$HOME/Documents/播客总结"/{转录稿,音频,总结稿}
+df -h "$HOME/Documents"    # 检查磁盘空间
 ```

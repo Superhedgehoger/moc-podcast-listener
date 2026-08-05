@@ -17,7 +17,7 @@ error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_SCRIPT="$SCRIPT_DIR/podcast-listener.py"
-OUTPUT_DIR="${OUTPUT_DIR:-/Users/djy/Documents/播客总结}"
+OUTPUT_DIR="${OUTPUT_DIR:-$HOME/Documents/播客总结}"
 ASR_ENGINE="${ASR_ENGINE:-sensevoice}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 

@@ -81,7 +81,7 @@ python3 podcast-listener.py --archive-only \
 处理完成后输出目录结构如下（`总结稿/` 中的最终报告由 Agent 后续写入）：
 
 ```text
-/Users/djy/Documents/播客总结/
+~/Documents/播客总结/
 ├── {节目名称}_{播客标题}_{发布日期}_metadata.json
 ├── {节目名称}_{播客标题}_{发布日期}_Agent任务指令.txt
 ├── 音频/
@@ -105,7 +105,7 @@ python3 podcast-listener.py --archive-only \
 把终端打印出的 Agent 任务指令交给 Agent 继续执行即可。最终报告由 Agent 写入：
 
 ```text
-/Users/djy/Documents/播客总结/总结稿/
+~/Documents/播客总结/总结稿/
 └── {节目名称}_{播客标题}_{发布日期}_详细总结.md
 ```
 
@@ -176,7 +176,7 @@ Whisper 会使用 `initial_prompt` 注入节目标题和嘉宾/说话人候选�
 转录稿超过 30000 字时，按 `SKILL.md` 推荐使用证据提取流程。可先运行：
 
 ```bash
-python3 chunk_transcript.py "/Users/djy/Documents/播客总结/转录稿/{节目名称}_{播客标题}_{发布日期}_转录稿.txt"
+python3 chunk_transcript.py "$HOME/Documents/播客总结/转录稿/{节目名称}_{播客标题}_{发布日期}_转录稿.txt"
 ```
 
 默认每块约 8000 字，并从第二块开始附带上一块结尾 400 字上下文。工具会生成：
@@ -197,7 +197,7 @@ Agent 应对每块独立提取观点、证据、实体和引述，合并去重�
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `WHISPER_MODEL` | `large-v3` | 首选 Whisper 模型 |
-| `OUTPUT_DIR` | `/Users/djy/Documents/播客总结` | 输出目录 |
+| `OUTPUT_DIR` | `~/Documents/播客总结` | 输出目录 |
 | `KEEP_AUDIO` | `0` | 设为 `1` 时保留临时音频和 WAV |
 | `FORCE_TRANSCRIBE` | `0` | 设为 `1` 时忽略匹配缓存并重新转录 |
 | `ASR_ENGINE` | `sensevoice` | `sensevoice`、`whisper` 或 `stitch` |

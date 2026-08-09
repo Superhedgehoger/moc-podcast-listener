@@ -130,7 +130,7 @@ downloaded audio, generated transcripts, or storage credentials.
 python3 -m unittest discover -s tests -v
 ```
 
-Current regression suite: 32 tests.
+Current regression suite: 34 tests.
 
 ## Security / 安全
 
@@ -141,5 +141,4 @@ Current regression suite: 32 tests.
 
 ## License
 
-No license has been selected yet. All rights are reserved until a license file
-is added.
+Licensed under the [MIT License](LICENSE).

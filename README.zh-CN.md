@@ -2,7 +2,7 @@
 
 **简体中文** | [English](README.en.md) | [多语言首页](README.md)
 
-> 版本：v4.4  
+> 版本：v4.5.0
 > 核心流程：IM 输入 → 平台解析 → 音频下载 → SenseVoice/Whisper 转录 → Show Notes 归档 → Agent 直接总结
 
 很多播客值得反复查阅，但音频不方便搜索，Show Notes 中的图片和链接也可能失效。

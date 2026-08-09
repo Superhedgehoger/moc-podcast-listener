@@ -187,7 +187,7 @@ Reload the agent after installation.
 python3 -m unittest discover -s tests -v
 ```
 
-The current suite contains 32 offline regression tests.
+The current suite contains 34 offline regression tests.
 
 ## Security
 
@@ -201,5 +201,4 @@ The current suite contains 32 offline regression tests.
 
 ## License
 
-No license has been selected. All rights are reserved until a license file is
-added.
+Licensed under the [MIT License](LICENSE).

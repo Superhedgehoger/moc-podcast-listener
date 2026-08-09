@@ -14,9 +14,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+from version import __version__
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="快速转录播客链接或名称")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("input", nargs="+", help="播客链接、带标题的链接或搜索关键词")
     parser.add_argument(
         "--engine",

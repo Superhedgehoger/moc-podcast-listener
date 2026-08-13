@@ -150,5 +150,4 @@ The regression suite is fully offline; the command reports the current count.
 
 ## License
 
-No license has been selected yet. All rights are reserved until a license file
-is added.
+Licensed under the [MIT License](LICENSE).

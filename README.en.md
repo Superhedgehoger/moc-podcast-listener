@@ -227,5 +227,4 @@ The regression suite is fully offline; run it to see the current test count.
 
 ## License
 
-No license has been selected. All rights are reserved until a license file is
-added.
+Licensed under the [MIT License](LICENSE).

@@ -36,6 +36,8 @@ from urllib.parse import parse_qs, quote, urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 import xml.etree.ElementTree as ET
 
+from version import __version__
+
 
 DEFAULT_OUTPUT_DIR = Path.home() / "Documents" / "播客总结"
 DEFAULT_MODEL = "large-v3"
@@ -4088,6 +4090,7 @@ def parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="解析、归档并转录播客链接、RSS、媒体页面或节目搜索词。"
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("input", nargs="*", help="单集链接、带标题链接或搜索关键词")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(

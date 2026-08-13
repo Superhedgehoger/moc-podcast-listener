@@ -29,7 +29,13 @@ output/
 *_转录稿.txt
 *_segments.json
 *.srt
+*.vtt
+!tests/fixtures/*.vtt
+*_chapters.source.json
+*_chapters.json
 *_metadata.json
 *_Agent任务指令.txt
 *_shownotes.raw.html
 *_media-manifest.json
+.jobs/
+链接快照/

@@ -95,7 +95,8 @@ pip3 install funasr --upgrade
 
 ## ❌ 问题：转录稿存在，但总结失败
 
-v3.x 中总结由 Agent 直接执行，不依赖外部脚本或 API。
+总结由 Agent 直接执行，不依赖外部脚本或 API。脚本生成转录后，作业会停在
+`awaiting_report`，这不是故障，而是明确表示总结尚未写入。
 
 如果 Agent 反馈转录稿过长，运行项目自带的分块工具：
 
@@ -104,6 +105,53 @@ python3 chunk_transcript.py "transcript.txt"
 ```
 
 让 Agent 按 `REFINE_MANIFEST.md` 对每块独立提取证据，合并去重后只生成一次正式报告。
+
+报告生成后执行任务指令末尾的核验命令：
+
+```bash
+python3 podcast-listener.py --output-dir "$HOME/Documents/播客总结" \
+  --verify "JOB_ID" --require-report
+```
+
+检查当前状态或结果：
+
+```bash
+cat "$HOME/Documents/播客总结/.jobs/JOB_ID/status.json"
+cat "$HOME/Documents/播客总结/.jobs/JOB_ID/result.json"
+```
+
+若进程中断，不要启动重复转录，优先恢复检查点：
+
+```bash
+python3 podcast-listener.py --output-dir "$HOME/Documents/播客总结" --resume "JOB_ID"
+python3 podcast-listener.py --output-dir "$HOME/Documents/播客总结" --resume latest
+```
+
+---
+
+## ❌ 问题：发布方转录或章节文件不可用
+
+RSS 提供的 `<podcast:transcript>` 和 `<podcast:chapters>` 仍可能失效或格式不规范。
+发布方转录失败时会自动尝试下一种格式，最后回退到本地 ASR；章节失败只记录原因，
+不会中断转录。可在 metadata、`result.json` 和章节归档字段中查看源 URL、HTTP 状态和
+失败原因。需要强制本地转录时：
+
+```bash
+PREFER_PUBLISHER_TRANSCRIPT=0 python3 podcast-listener.py --force-transcribe "EPISODE_URL"
+```
+
+---
+
+## ❌ 问题：Show Notes 外链没有保存网页副本
+
+外链快照默认关闭。安装 SingleFile CLI 或 ArchiveBox 后显式启用：
+
+```bash
+python3 podcast-listener.py --archive-only --link-snapshot singlefile "EPISODE_URL"
+```
+
+快照失败不会删除在线链接。具体结果和失败原因位于
+`Show Notes/*_media-manifest.json` 的 `links[].snapshot` 中。
 
 ---
 

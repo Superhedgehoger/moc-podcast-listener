@@ -22,6 +22,7 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -30,7 +31,9 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, urljoin, urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 import xml.etree.ElementTree as ET
 
 
@@ -40,8 +43,10 @@ FALLBACK_MODELS = ["large-v3", "small", "base"]
 ITUNES_LOOKUP_URL = "https://itunes.apple.com/lookup"
 ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
 SHOWNOTES_ASSET_MODES = {"off", "online", "local", "hybrid"}
+SHOWNOTES_LINK_SNAPSHOT_MODES = {"none", "singlefile", "archivebox"}
 SHOWNOTES_DEFAULT_MAX_IMAGES = 40
 SHOWNOTES_DEFAULT_MAX_IMAGE_BYTES = 15 * 1024 * 1024
+SHOWNOTES_DEFAULT_MAX_LINK_SNAPSHOTS = 10
 IMAGE_CONTENT_TYPE_EXTENSIONS = {
     "image/jpeg": ".jpg",
     "image/png": ".png",
@@ -49,6 +54,10 @@ IMAGE_CONTENT_TYPE_EXTENSIONS = {
     "image/webp": ".webp",
     "image/avif": ".avif",
 }
+HTTP_REDIRECT_CODES = {301, 302, 303, 307, 308}
+MAX_HTTP_REDIRECTS = 8
+MAX_TEXT_RESPONSE_BYTES = 20 * 1024 * 1024
+PROXY_FAKE_IP_NETWORK = ipaddress.ip_network("198.18.0.0/15")
 
 
 def log(msg: str) -> None:
@@ -63,8 +72,18 @@ def error(msg: str) -> None:
     print(f"[ERROR] {msg}", file=sys.stderr)
 
 
-def run_command(args: list[str], timeout: int | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+def run_command(
+    args: list[str],
+    timeout: int | None = None,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        cwd=str(cwd) if cwd else None,
+    )
 
 
 def is_url(value: str) -> bool:
@@ -72,28 +91,175 @@ def is_url(value: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
+def iso_timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def is_safe_remote_url(url: str) -> tuple[bool, str | None]:
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+    if parsed.scheme not in {"http", "https"} or not hostname:
+        return False, "unsupported URL"
+    if parsed.username or parsed.password:
+        return False, "URL credentials are not allowed"
+    if hostname.lower() == "localhost" or hostname.lower().endswith(".localhost"):
+        return False, "local address blocked"
+
+    try:
+        literal_ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        literal_ip = None
+    if literal_ip is not None and not literal_ip.is_global:
+        return False, f"non-public address blocked: {literal_ip}"
+
+    try:
+        default_port = 443 if parsed.scheme == "https" else 80
+        addresses = {
+            item[4][0]
+            for item in socket.getaddrinfo(hostname, parsed.port or default_port)
+        }
+    except OSError as exc:
+        return False, f"DNS lookup failed: {exc}"
+
+    for address in addresses:
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:
+            return False, f"invalid resolved address: {address}"
+        fake_ip_allowed = (
+            literal_ip is None
+            and ip in PROXY_FAKE_IP_NETWORK
+            and os.environ.get("ALLOW_PROXY_FAKE_IP", "1") != "0"
+        )
+        if not ip.is_global and not fake_ip_allowed:
+            return False, f"non-public address blocked: {address}"
+    return True, None
+
+
+class NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        return None
+
+
+def open_safe_http(
+    url: str,
+    *,
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+    timeout: int = 40,
+):
+    """Open an HTTP URL after validating every redirect target."""
+    current_url = url
+    opener = build_opener(NoRedirectHandler())
+    request_headers = {
+        "User-Agent": "Mozilla/5.0 podcast-listener",
+        "Accept": "*/*",
+        **(headers or {}),
+    }
+
+    for _ in range(MAX_HTTP_REDIRECTS + 1):
+        safe, reason = is_safe_remote_url(current_url)
+        if not safe:
+            raise ValueError(reason or "unsafe URL")
+        request = Request(current_url, headers=request_headers, method=method)
+        try:
+            response = opener.open(request, timeout=timeout)
+        except HTTPError as exc:
+            if exc.code not in HTTP_REDIRECT_CODES:
+                raise
+            location = exc.headers.get("Location")
+            exc.close()
+            if not location:
+                raise ValueError(f"redirect without Location header: HTTP {exc.code}")
+            current_url = urljoin(current_url, location)
+            continue
+        return response, current_url
+    raise ValueError(f"too many redirects (>{MAX_HTTP_REDIRECTS})")
+
+
 def fetch_text(url: str, timeout: int = 40) -> str | None:
     try:
-        result = run_command(
-            [
-                "curl",
-                "-s",
-                "-L",
-                "--max-time",
-                str(max(timeout - 5, 5)),
-                "-A",
-                "Mozilla/5.0 podcast-listener",
-                url,
-            ],
-            timeout=timeout,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout
-        warn(f"获取失败: {url} {result.stderr.strip()}")
-        return None
+        response, _ = open_safe_http(url, timeout=timeout)
+        with response:
+            payload = response.read(MAX_TEXT_RESPONSE_BYTES + 1)
+            if len(payload) > MAX_TEXT_RESPONSE_BYTES:
+                warn(f"获取失败: {url} response exceeds {MAX_TEXT_RESPONSE_BYTES} bytes")
+                return None
+            charset = response.headers.get_content_charset() or "utf-8"
+        decoded = payload.decode(charset, errors="replace")
+        return decoded if decoded.strip() else None
     except Exception as exc:
         warn(f"获取异常: {url} {exc}")
         return None
+
+
+def download_http_resource(
+    url: str,
+    output_path: Path,
+    *,
+    max_bytes: int | None = None,
+    timeout: int = 90,
+    referer: str | None = None,
+    resume: bool = False,
+) -> dict[str, Any]:
+    """Download one HTTP resource with redirect validation and bounded streaming."""
+    fetched_at = iso_timestamp()
+    existing_bytes = output_path.stat().st_size if resume and output_path.exists() else 0
+    headers: dict[str, str] = {}
+    if referer:
+        headers["Referer"] = referer
+    if existing_bytes:
+        headers["Range"] = f"bytes={existing_bytes}-"
+
+    try:
+        response, final_url = open_safe_http(
+            url,
+            headers=headers,
+            timeout=timeout,
+        )
+        with response:
+            status = int(getattr(response, "status", response.getcode()))
+            append = bool(existing_bytes and status == 206)
+            total_before = existing_bytes if append else 0
+            raw_length = response.headers.get("Content-Length")
+            if max_bytes and raw_length and total_before + int(raw_length) > max_bytes:
+                raise ValueError(f"response exceeds {max_bytes} bytes")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            mode = "ab" if append else "wb"
+            written = total_before
+            with output_path.open(mode) as handle:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if max_bytes and written > max_bytes:
+                        raise ValueError(f"response exceeds {max_bytes} bytes")
+                    handle.write(chunk)
+            content_type = (response.headers.get("Content-Type") or "").split(";", 1)[0].strip()
+        return {
+            "ok": True,
+            "source_url": url,
+            "final_url": final_url,
+            "http_status": status,
+            "fetched_at": fetched_at,
+            "content_type": content_type or None,
+            "bytes": output_path.stat().st_size,
+            "path": str(output_path),
+        }
+    except (HTTPError, URLError, OSError, ValueError) as exc:
+        status = exc.code if isinstance(exc, HTTPError) else None
+        return {
+            "ok": False,
+            "source_url": url,
+            "final_url": getattr(exc, "url", None) or url,
+            "http_status": status,
+            "fetched_at": fetched_at,
+            "content_type": None,
+            "bytes": output_path.stat().st_size if output_path.exists() else 0,
+            "error": str(exc),
+            "failure_reason": str(exc),
+        }
 
 
 def fetch_json(url: str, timeout: int = 40) -> dict[str, Any] | None:
@@ -161,6 +327,27 @@ def extract_next_data(html_text: str) -> dict[str, Any] | None:
         return json.loads(raw_json)
     except json.JSONDecodeError:
         return None
+
+
+def extract_podcast_schema(html_text: str) -> dict[str, Any] | None:
+    for match in re.finditer(
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        html_text,
+        flags=re.DOTALL | re.IGNORECASE,
+    ):
+        try:
+            value = json.loads(html.unescape(match.group(1)))
+        except json.JSONDecodeError:
+            continue
+        candidates = value if isinstance(value, list) else [value]
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            schema_type = candidate.get("@type")
+            types = schema_type if isinstance(schema_type, list) else [schema_type]
+            if "PodcastEpisode" in types:
+                return candidate
+    return None
 
 
 def walk_json(value: Any):
@@ -347,6 +534,120 @@ def rss_item_audio_url(item: ET.Element) -> str | None:
     return None
 
 
+def parse_duration_minutes(value: str | None) -> float:
+    raw = clean_text(value)
+    if not raw:
+        return 0.0
+    try:
+        if ":" not in raw:
+            return max(0.0, float(raw) / 60.0)
+        parts = [float(part) for part in raw.split(":")]
+        if len(parts) == 2:
+            seconds = parts[0] * 60 + parts[1]
+        elif len(parts) == 3:
+            seconds = parts[0] * 3600 + parts[1] * 60 + parts[2]
+        else:
+            return 0.0
+        return max(0.0, seconds / 60.0)
+    except ValueError:
+        return 0.0
+
+
+def parse_iso8601_duration_minutes(value: str | None) -> float:
+    raw = clean_text(value)
+    match = re.fullmatch(
+        r"P(?:(?P<days>\d+(?:\.\d+)?)D)?(?:T(?:(?P<hours>\d+(?:\.\d+)?)H)?(?:(?P<minutes>\d+(?:\.\d+)?)M)?(?:(?P<seconds>\d+(?:\.\d+)?)S)?)?",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return 0.0
+    days = float(match.group("days") or 0)
+    hours = float(match.group("hours") or 0)
+    minutes = float(match.group("minutes") or 0)
+    seconds = float(match.group("seconds") or 0)
+    return days * 1440 + hours * 60 + minutes + seconds / 60
+
+
+def rss_people(element: ET.Element | None) -> list[dict[str, str]]:
+    if element is None:
+        return []
+    people: list[dict[str, str]] = []
+    for child in list(element):
+        if xml_local_name(child.tag) != "person":
+            continue
+        name = clean_text(child.text)
+        if not name:
+            continue
+        person = {
+            "name": name,
+            "role": clean_text(child.attrib.get("role")) or "host",
+            "group": clean_text(child.attrib.get("group")) or "cast",
+        }
+        for key in ("img", "href"):
+            value = child.attrib.get(key)
+            if value:
+                person[key] = html.unescape(value)
+        people.append(person)
+    return people
+
+
+def rss_transcripts(element: ET.Element) -> list[dict[str, str]]:
+    transcripts: list[dict[str, str]] = []
+    for child in list(element):
+        if xml_local_name(child.tag) != "transcript":
+            continue
+        url = child.attrib.get("url")
+        media_type = child.attrib.get("type")
+        if not url or not media_type:
+            continue
+        entry = {
+            "url": html.unescape(url),
+            "type": media_type.strip().lower(),
+        }
+        for key in ("language", "rel"):
+            value = child.attrib.get(key)
+            if value:
+                entry[key] = value.strip()
+        transcripts.append(entry)
+    return transcripts
+
+
+def rss_chapters(element: ET.Element) -> dict[str, str] | None:
+    for child in list(element):
+        if xml_local_name(child.tag) != "chapters":
+            continue
+        url = child.attrib.get("url")
+        if url:
+            return {
+                "url": html.unescape(url),
+                "type": (child.attrib.get("type") or "application/json+chapters").strip().lower(),
+            }
+    return None
+
+
+def rss_images(element: ET.Element | None) -> list[dict[str, Any]]:
+    if element is None:
+        return []
+    images: list[dict[str, Any]] = []
+    for child in list(element):
+        if xml_local_name(child.tag) != "image":
+            continue
+        href = child.attrib.get("href") or child.attrib.get("url")
+        if not href:
+            nested_url = first_child_text(child, {"url"})
+            href = nested_url or None
+        if not href:
+            continue
+        entry: dict[str, Any] = {"href": html.unescape(href)}
+        for key in ("alt", "aspect-ratio", "width", "height", "type", "purpose"):
+            value = child.attrib.get(key)
+            if value:
+                entry[key] = value
+        images.append(entry)
+    return images
+
+
 def rss_items(feed_xml: str) -> list[dict[str, Any]]:
     try:
         root = ET.fromstring(feed_xml)
@@ -358,6 +659,9 @@ def rss_items(feed_xml: str) -> list[dict[str, Any]]:
     channel = next((item for item in root.iter() if xml_local_name(item.tag) == "channel"), None)
     if channel is not None:
         show_title = first_child_text(channel, {"title"}) or show_title
+    channel_people = rss_people(channel)
+    channel_images = rss_images(channel)
+    feed_language = first_child_text(channel, {"language"}) if channel is not None else ""
 
     items: list[dict[str, Any]] = []
     for item in root.iter():
@@ -369,6 +673,21 @@ def rss_items(feed_xml: str) -> list[dict[str, Any]]:
         link = first_child_text(item, {"link"})
         author = first_child_text(item, {"author", "creator"})
         audio_url = rss_item_audio_url(item)
+        item_people = rss_people(item)
+        people = item_people or channel_people
+        speaker_people = [
+            person["name"]
+            for person in people
+            if person.get("group", "cast").lower() == "cast"
+            or person.get("role", "host").lower() in {"host", "co-host", "guest"}
+        ]
+        if author and author not in speaker_people:
+            speaker_people.append(author)
+        item_images = rss_images(item)
+        images = item_images or channel_images
+        transcripts = rss_transcripts(item)
+        chapters = rss_chapters(item)
+        duration = parse_duration_minutes(first_child_text(item, {"duration"}))
         
         pub_date_raw = first_child_text(item, {"pubdate", "pubDate", "date"})
         pub_date = None
@@ -391,10 +710,15 @@ def rss_items(feed_xml: str) -> list[dict[str, Any]]:
                     "title": title or "Unknown",
                     "url": link,
                     "audio_url": audio_url,
-                    "cover_url": "",
+                    "cover_url": images[0]["href"] if images else "",
                     "show_notes": description,
-                    "guests": [author] if author else [],
-                    "duration_minutes": 0.0,
+                    "guests": speaker_people,
+                    "people": people,
+                    "transcripts": transcripts,
+                    "chapters": chapters,
+                    "images": images,
+                    "language": feed_language or None,
+                    "duration_minutes": duration,
                     "show_title": show_title,
                     "pub_date": pub_date,
                     "guid": guid,
@@ -419,6 +743,18 @@ def select_rss_episode(
     items = rss_items(feed_xml)
     if not items:
         return None
+    for item in items:
+        for transcript in item.get("transcripts") or []:
+            if transcript.get("url"):
+                transcript["url"] = urljoin(feed_url, transcript["url"])
+        chapters = item.get("chapters")
+        if isinstance(chapters, dict) and chapters.get("url"):
+            chapters["url"] = urljoin(feed_url, chapters["url"])
+        for image in item.get("images") or []:
+            if image.get("href"):
+                image["href"] = urljoin(feed_url, image["href"])
+        if item.get("images"):
+            item["cover_url"] = item["images"][0]["href"]
 
     if episode_id:
         for item in items:
@@ -446,13 +782,23 @@ def select_rss_episode(
 def extract_show_notes(html_text: str, data: dict[str, Any] | None) -> str:
     candidates: list[str] = []
     if data:
+        episode = find_key_path(data, ["props", "pageProps", "episode"])
+        if isinstance(episode, dict):
+            for key in ("shownotes", "showNotes", "description", "content", "brief"):
+                value = episode.get(key)
+                if isinstance(value, str) and value.strip():
+                    candidates.append(value)
         for key_set in [
-            {"shownotes", "showNotes", "description", "content", "brief"},
-            {"podcastDescription", "episodeDescription"},
+            {"shownotes", "showNotes"},
+            {"episodeDescription", "description", "content", "brief"},
         ]:
             value = first_string_by_keys(data, key_set)
-            if value:
+            if value and value not in candidates:
                 candidates.append(value)
+
+    schema = extract_podcast_schema(html_text)
+    if schema and isinstance(schema.get("description"), str):
+        candidates.append(str(schema["description"]))
 
     meta_match = re.search(
         r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']+)["\']',
@@ -463,7 +809,17 @@ def extract_show_notes(html_text: str, data: dict[str, Any] | None) -> str:
         candidates.append(meta_match.group(1))
 
     usable = [(item.strip(), clean_text(item)) for item in candidates if clean_text(item)]
-    return max(usable, key=lambda item: len(item[1]))[0] if usable else ""
+    if not usable:
+        return ""
+
+    def richness(item: tuple[str, str]) -> tuple[int, int]:
+        raw, plain = item
+        rich_tags = len(
+            re.findall(r"<(?:img|a|picture|source)\b", raw, flags=re.IGNORECASE)
+        )
+        return rich_tags, len(plain)
+
+    return max(usable, key=richness)[0]
 
 
 def extract_guests(title: str, show_notes: str, data: dict[str, Any] | None) -> list[str]:
@@ -480,15 +836,7 @@ def extract_guests(title: str, show_notes: str, data: dict[str, Any] | None) -> 
             if 1 < len(piece) <= 24 and not re.search(r"https?://|\d{3,}", piece):
                 names.append(piece)
 
-    if data:
-        for item in walk_json(data):
-            if not isinstance(item, dict):
-                continue
-            for key, value in item.items():
-                if key.lower() in {"nickname", "name", "username", "author", "speaker"} and isinstance(value, str):
-                    add_name(value)
-
-    text = "\n".join([title, show_notes])
+    text = "\n".join([title, clean_text(show_notes)])
     guest_patterns = [
         r"(?:本期嘉宾|嘉宾|主播|主持人|对谈人|采访者|受访者)[:：]\s*([^\n]+)",
         r"(?:和|与)([\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z·.\s]{1,20})(?:聊|谈|对话)",
@@ -496,6 +844,26 @@ def extract_guests(title: str, show_notes: str, data: dict[str, Any] | None) -> 
     for pattern in guest_patterns:
         for match in re.finditer(pattern, text):
             add_name(match.group(1))
+
+    # Restrict structured candidates to explicit episode fields. A full JSON walk
+    # also reaches listener comments and permission names such as SHARE/COMMENT.
+    if data and not names:
+        episode = find_key_path(data, ["props", "pageProps", "episode"])
+        if not isinstance(episode, dict):
+            episode = find_key_path(data, ["episode"])
+        if isinstance(episode, dict):
+            for key in ("hosts", "guests", "speakers", "people"):
+                value = episode.get(key)
+                values = value if isinstance(value, list) else [value]
+                for candidate in values:
+                    if isinstance(candidate, str):
+                        add_name(candidate)
+                    elif isinstance(candidate, dict):
+                        add_name(
+                            candidate.get("name")
+                            or candidate.get("nickname")
+                            or candidate.get("username")
+                        )
 
     seen: set[str] = set()
     unique: list[str] = []
@@ -517,30 +885,6 @@ def normalize_shownotes_url(raw_url: str | None, base_url: str | None = None) ->
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         return ""
     return resolved
-
-
-def is_safe_remote_url(url: str) -> tuple[bool, str | None]:
-    parsed = urlparse(url)
-    hostname = parsed.hostname
-    if parsed.scheme not in {"http", "https"} or not hostname:
-        return False, "unsupported URL"
-    if hostname.lower() == "localhost" or hostname.lower().endswith(".localhost"):
-        return False, "local address blocked"
-
-    try:
-        default_port = 443 if parsed.scheme == "https" else 80
-        addresses = {item[4][0] for item in socket.getaddrinfo(hostname, parsed.port or default_port)}
-    except OSError as exc:
-        return False, f"DNS lookup failed: {exc}"
-
-    for address in addresses:
-        try:
-            ip = ipaddress.ip_address(address)
-        except ValueError:
-            return False, f"invalid resolved address: {address}"
-        if not ip.is_global:
-            return False, f"non-public address blocked: {address}"
-    return True, None
 
 
 def markdown_escape_text(value: str) -> str:
@@ -706,54 +1050,40 @@ def download_shownotes_image(
 ) -> dict[str, Any]:
     url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()[:10]
     temp_path = assets_dir / f".image-{index:02d}-{url_hash}.download"
-    safe, safety_error = is_safe_remote_url(url)
-    if not safe:
-        return {"ok": False, "error": safety_error or "unsafe URL"}
     try:
-        command = [
-            "curl",
-            "-L",
-            "-f",
-            "-sS",
-            "--connect-timeout",
-            "15",
-            "--max-time",
-            "90",
-            "--max-filesize",
-            str(max_bytes),
-            "-A",
-            "Mozilla/5.0 podcast-listener",
-        ]
-        if referer:
-            command.extend(["-e", referer])
-        command.extend(
-            [
-                "-w",
-                "%{content_type}",
-                "-o",
-                str(temp_path),
-                url,
-            ]
-        )
-        result = run_command(
-            command,
-            timeout=100,
+        downloaded = download_http_resource(
+            url,
+            temp_path,
+            max_bytes=max_bytes,
+            timeout=90,
+            referer=referer,
         )
         if (
-            result.returncode != 0
+            not downloaded.get("ok")
             or not temp_path.exists()
             or temp_path.stat().st_size == 0
             or temp_path.stat().st_size > max_bytes
         ):
             if temp_path.exists():
                 temp_path.unlink()
-            return {"ok": False, "error": result.stderr.strip() or "download failed"}
+            return downloaded
 
-        content_type = result.stdout.strip()
-        ext = detect_image_extension(temp_path, content_type, url)
+        content_type = str(downloaded.get("content_type") or "")
+        ext = detect_image_extension(
+            temp_path,
+            content_type,
+            str(downloaded.get("final_url") or url),
+        )
         if not ext:
             temp_path.unlink()
-            return {"ok": False, "error": f"response is not a supported image: {content_type or 'unknown type'}"}
+            downloaded.update(
+                {
+                    "ok": False,
+                    "error": f"response is not a supported image: {content_type or 'unknown type'}",
+                    "failure_reason": f"response is not a supported image: {content_type or 'unknown type'}",
+                }
+            )
+            return downloaded
 
         file_hash = hashlib.sha256(temp_path.read_bytes()).hexdigest()
         final_path = assets_dir / f"image-{index:02d}-{file_hash[:10]}{ext}"
@@ -761,20 +1091,159 @@ def download_shownotes_image(
             temp_path.replace(final_path)
         else:
             temp_path.unlink()
-        return {
-            "ok": True,
-            "path": str(final_path),
-            "sha256": file_hash,
-            "bytes": final_path.stat().st_size,
-            "content_type": content_type or None,
-        }
+        downloaded.update(
+            {
+                "ok": True,
+                "path": str(final_path),
+                "sha256": file_hash,
+                "bytes": final_path.stat().st_size,
+                "content_type": content_type or None,
+            }
+        )
+        return downloaded
     except Exception as exc:
         try:
             if temp_path.exists():
                 temp_path.unlink()
         except OSError:
             pass
-        return {"ok": False, "error": str(exc)}
+        return {
+            "ok": False,
+            "source_url": url,
+            "final_url": url,
+            "http_status": None,
+            "fetched_at": iso_timestamp(),
+            "content_type": None,
+            "bytes": 0,
+            "error": str(exc),
+            "failure_reason": str(exc),
+        }
+
+
+def snapshot_shownotes_links(
+    links: list[dict[str, Any]],
+    output_dir: Path,
+    combined_name: str,
+    mode: str,
+) -> dict[str, Any]:
+    """Optionally archive a bounded number of first-level Show Notes links."""
+    if mode not in SHOWNOTES_LINK_SNAPSHOT_MODES:
+        warn(f"SHOWNOTES_LINK_SNAPSHOT 值 '{mode}' 无效，将使用 none")
+        mode = "none"
+    summary: dict[str, Any] = {
+        "mode": mode,
+        "requested": 0,
+        "completed": 0,
+        "failed": 0,
+        "directory": None,
+    }
+    if mode == "none" or not links:
+        return summary
+
+    try:
+        max_links = max(
+            0,
+            int(
+                os.environ.get(
+                    "SHOWNOTES_MAX_LINK_SNAPSHOTS",
+                    str(SHOWNOTES_DEFAULT_MAX_LINK_SNAPSHOTS),
+                )
+            ),
+        )
+    except ValueError:
+        max_links = SHOWNOTES_DEFAULT_MAX_LINK_SNAPSHOTS
+        warn("SHOWNOTES_MAX_LINK_SNAPSHOTS 无效，将使用默认值 10")
+
+    snapshots_dir = output_dir / "链接快照" / f"{combined_name}_links"
+    snapshots_dir.mkdir(parents=True, exist_ok=True)
+    summary["directory"] = str(snapshots_dir)
+    binary_name = (
+        os.environ.get("SINGLEFILE_BIN", "single-file")
+        if mode == "singlefile"
+        else os.environ.get("ARCHIVEBOX_BIN", "archivebox")
+    )
+    binary = shutil.which(binary_name)
+    if not binary:
+        reason = f"command not found: {binary_name}"
+        for link in links[:max_links]:
+            link["snapshot"] = {"status": "failed", "reason": reason}
+        summary["requested"] = min(len(links), max_links)
+        summary["failed"] = summary["requested"]
+        summary["reason"] = reason
+        warn(f"Show Notes 链接快照未执行: {reason}")
+        return summary
+
+    archivebox_ready = False
+    archivebox_dir = snapshots_dir / "archivebox"
+    for index, link in enumerate(links[:max_links], start=1):
+        url = str(link.get("url") or "")
+        summary["requested"] += 1
+        safe, reason = is_safe_remote_url(url)
+        if not safe:
+            link["snapshot"] = {
+                "status": "failed",
+                "reason": reason or "unsafe URL",
+            }
+            summary["failed"] += 1
+            continue
+        try:
+            if mode == "singlefile":
+                url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()[:10]
+                target = snapshots_dir / f"link-{index:02d}-{url_hash}.html"
+                completed = run_command([binary, url, str(target)], timeout=300)
+                if completed.returncode != 0 or not target.is_file():
+                    raise RuntimeError(
+                        completed.stderr.strip()
+                        or completed.stdout.strip()
+                        or f"SingleFile exited with {completed.returncode}"
+                    )
+                link["snapshot"] = {
+                    "status": "complete",
+                    "mode": mode,
+                    "path": str(target),
+                    "bytes": target.stat().st_size,
+                    "captured_at": iso_timestamp(),
+                }
+            else:
+                archivebox_dir.mkdir(parents=True, exist_ok=True)
+                if not archivebox_ready:
+                    if not (archivebox_dir / "index.sqlite3").exists():
+                        initialized = run_command([binary, "init"], timeout=300, cwd=archivebox_dir)
+                        if initialized.returncode != 0:
+                            raise RuntimeError(
+                                initialized.stderr.strip()
+                                or initialized.stdout.strip()
+                                or f"ArchiveBox init exited with {initialized.returncode}"
+                            )
+                    archivebox_ready = True
+                completed = run_command(
+                    [binary, "add", url],
+                    timeout=600,
+                    cwd=archivebox_dir,
+                )
+                if completed.returncode != 0:
+                    raise RuntimeError(
+                        completed.stderr.strip()
+                        or completed.stdout.strip()
+                        or f"ArchiveBox exited with {completed.returncode}"
+                    )
+                link["snapshot"] = {
+                    "status": "complete",
+                    "mode": mode,
+                    "depth": 0,
+                    "path": str(archivebox_dir),
+                    "captured_at": iso_timestamp(),
+                }
+            summary["completed"] += 1
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            link["snapshot"] = {
+                "status": "failed",
+                "mode": mode,
+                "reason": str(exc),
+            }
+            summary["failed"] += 1
+            warn(f"Show Notes 链接快照失败，仍保留在线链接: {url}: {exc}")
+    return summary
 
 
 def archive_show_notes(info: dict[str, Any], output_dir: Path, combined_name: str) -> dict[str, Any] | None:
@@ -827,8 +1296,19 @@ def archive_show_notes(info: dict[str, Any], output_dir: Path, combined_name: st
     def resolve_image(src: str, alt: str) -> str:
         image_entry: dict[str, Any] = {"source_url": src, "alt": alt}
         if src in seen_images:
-            image_entry["markdown_url"] = seen_images[src]
-            image_entry["duplicate"] = True
+            image_entry.update(
+                {
+                    "ok": None,
+                    "final_url": src,
+                    "http_status": None,
+                    "fetched_at": None,
+                    "content_type": None,
+                    "bytes": None,
+                    "status": "duplicate",
+                    "markdown_url": seen_images[src],
+                    "duplicate": True,
+                }
+            )
             images.append(image_entry)
             return seen_images[src]
 
@@ -867,7 +1347,31 @@ def archive_show_notes(info: dict[str, Any], output_dir: Path, combined_name: st
                         seen_hashes[file_hash] = str(path)
                     markdown_url = os.path.relpath(path, shownotes_dir)
                 else:
+                    image_entry.setdefault("failure_reason", downloaded.get("error"))
+                    image_entry["status"] = "failed"
                     warn(f"Show Notes 图片下载失败，保留在线链接: {src}")
+        else:
+            image_entry.update(
+                {
+                    "ok": None,
+                    "status": "online_only",
+                    "final_url": src,
+                    "http_status": None,
+                    "fetched_at": None,
+                    "content_type": None,
+                    "bytes": None,
+                }
+            )
+        if image_entry.get("ok"):
+            image_entry["status"] = "archived"
+        image_entry.setdefault("ok", None)
+        image_entry.setdefault("final_url", src)
+        image_entry.setdefault("http_status", None)
+        image_entry.setdefault("fetched_at", None)
+        image_entry.setdefault("content_type", None)
+        image_entry.setdefault("bytes", None)
+        if image_entry.get("error"):
+            image_entry.setdefault("failure_reason", image_entry["error"])
         image_entry["markdown_url"] = markdown_url
         seen_images[src] = markdown_url
         images.append(image_entry)
@@ -882,8 +1386,8 @@ def archive_show_notes(info: dict[str, Any], output_dir: Path, combined_name: st
     if source_url:
         markdown = f"[原始单集链接]({markdown_escape_url(source_url)})\n\n{markdown}".strip()
 
-    html_path.write_text(raw_show_notes, encoding="utf-8")
-    markdown_path.write_text(markdown + "\n", encoding="utf-8")
+    atomic_write_text(html_path, raw_show_notes)
+    atomic_write_text(markdown_path, markdown + "\n")
 
     image_urls = {item["source_url"] for item in images if item.get("source_url")}
     links = list(parser.links)
@@ -894,7 +1398,19 @@ def archive_show_notes(info: dict[str, Any], output_dir: Path, combined_name: st
             links.append({"text": normalized, "url": normalized})
             seen_links.add(normalized)
 
+    for link in links:
+        link["source_url"] = link.get("source_url") or link.get("url")
+        link["normalized_url"] = link.get("url")
+    snapshot_mode = os.environ.get("SHOWNOTES_LINK_SNAPSHOT", "none").lower().strip()
+    snapshot_summary = snapshot_shownotes_links(
+        links,
+        output_dir,
+        combined_name,
+        snapshot_mode,
+    )
+
     manifest = {
+        "schema_version": 2,
         "mode": mode,
         "episode_url": info.get("url"),
         "title": info.get("title"),
@@ -904,9 +1420,13 @@ def archive_show_notes(info: dict[str, Any], output_dir: Path, combined_name: st
         "assets_dir": str(assets_dir) if mode in {"local", "hybrid"} else None,
         "images": images,
         "links": links,
-        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "link_snapshots": snapshot_summary,
+        "created_at": iso_timestamp(),
     }
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(
+        manifest_path,
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+    )
     return {
         "raw_html_path": str(html_path),
         "markdown_path": str(markdown_path),
@@ -914,6 +1434,7 @@ def archive_show_notes(info: dict[str, Any], output_dir: Path, combined_name: st
         "assets_dir": str(assets_dir) if mode in {"local", "hybrid"} else None,
         "image_count": len(images),
         "link_count": len(links),
+        "link_snapshots": snapshot_summary,
         "mode": mode,
     }
 
@@ -945,34 +1466,53 @@ def get_episode_info(episode_id: str) -> dict[str, Any] | None:
             return None
 
         data = extract_next_data(page_html)
+        schema = extract_podcast_schema(page_html) or {}
+        episode_data = (
+            find_key_path(data, ["props", "pageProps", "episode"])
+            if data
+            else None
+        )
+        if not isinstance(episode_data, dict):
+            episode_data = {}
 
-        title = first_string_by_keys(data, {"title"}) if data else None
+        title = episode_data.get("title") or schema.get("name")
+        if not title:
+            title = extract_meta_content(page_html, "og:title")
         if not title:
             title_match = re.search(r"<title>(.*?)</title>", page_html, flags=re.DOTALL)
             title = title_match.group(1) if title_match else "Unknown"
-        title = clean_text(title).replace(" - 小宇宙", "").strip() or "Unknown"
+        title = re.sub(r"\s*[-|]\s*小宇宙.*$", "", clean_text(str(title))).strip() or "Unknown"
 
         show_notes = extract_show_notes(page_html, data)
-        audio_url = find_audio_url(page_html, data)
+        enclosure = episode_data.get("enclosure")
+        audio_url = enclosure.get("url") if isinstance(enclosure, dict) else None
+        associated_media = schema.get("associatedMedia")
+        if not audio_url and isinstance(associated_media, dict):
+            audio_url = associated_media.get("contentUrl")
+        audio_url = audio_url or extract_meta_content(page_html, "og:audio") or find_audio_url(page_html, data)
         guests = extract_guests(title, show_notes, data)
 
-        cover_url = first_string_by_keys(data, {"image", "cover", "coverUrl"}) if data else None
+        raw_image = episode_data.get("image")
+        cover_url = raw_image.get("picUrl") if isinstance(raw_image, dict) else None
+        cover_url = cover_url or extract_meta_content(page_html, "og:image")
 
         show_title = None
         pub_date = None
-        if data:
-            show_title = find_key_path(data, ["episode", "podcast", "title"]) or find_key_path(data, ["podcast", "title"])
-            raw_date = (
-                find_key_path(data, ["episode", "datePublished"])
-                or find_key_path(data, ["episode", "pubDate"])
-                or find_key_path(data, ["datePublished"])
-                or find_key_path(data, ["pubDate"])
-                or find_key_path(data, ["episode", "publishTime"])
-            )
-            if raw_date and isinstance(raw_date, str):
-                match = re.match(r"(\d{4})[-/]?(\d{2})[-/]?(\d{2})", raw_date)
-                if match:
-                    pub_date = "".join(match.groups())
+        podcast_data = episode_data.get("podcast")
+        if isinstance(podcast_data, dict):
+            show_title = podcast_data.get("title")
+        series = schema.get("partOfSeries")
+        if not show_title and isinstance(series, dict):
+            show_title = series.get("name")
+        raw_date = (
+            episode_data.get("pubDate")
+            or episode_data.get("datePublished")
+            or schema.get("datePublished")
+        )
+        if isinstance(raw_date, str):
+            match = re.match(r"(\d{4})[-/]?(\d{2})[-/]?(\d{2})", raw_date)
+            if match:
+                pub_date = "".join(match.groups())
 
         if not show_title:
             meta_podcast = extract_meta_content(page_html, "og:podcast:name") or extract_meta_content(page_html, "music:album")
@@ -995,6 +1535,15 @@ def get_episode_info(episode_id: str) -> dict[str, Any] | None:
         if not pub_date:
             pub_date = time.strftime("%Y%m%d")
 
+        duration_minutes = 0.0
+        raw_duration = episode_data.get("duration")
+        if isinstance(raw_duration, (int, float)):
+            duration_minutes = max(0.0, float(raw_duration) / 60.0)
+        elif isinstance(raw_duration, str):
+            duration_minutes = parse_duration_minutes(raw_duration)
+        if not duration_minutes and isinstance(schema.get("timeRequired"), str):
+            duration_minutes = parse_iso8601_duration_minutes(schema.get("timeRequired"))
+
         return {
             "id": episode_id,
             "title": title,
@@ -1003,7 +1552,7 @@ def get_episode_info(episode_id: str) -> dict[str, Any] | None:
             "cover_url": cover_url,
             "show_notes": show_notes,
             "guests": guests,
-            "duration_minutes": 0.0,
+            "duration_minutes": duration_minutes,
             "show_title": show_title,
             "pub_date": pub_date,
             "html_sample": page_html[:2000] if not audio_url else None,
@@ -1871,8 +2420,24 @@ def download_audio(audio_url: str, output_path: Path) -> bool:
     dl_timeout = int(os.environ.get("DOWNLOAD_TIMEOUT", "1800"))
     try:
         if ".m3u8" in audio_url.lower():
+            response, final_url = open_safe_http(
+                audio_url,
+                headers={"Range": "bytes=0-0"},
+                timeout=min(dl_timeout, 60),
+            )
+            response.close()
             result = run_command(
-                ["ffmpeg", "-y", "-i", audio_url, "-c", "copy", str(output_path)],
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-protocol_whitelist",
+                    "file,http,https,tcp,tls,crypto",
+                    "-i",
+                    final_url,
+                    "-c",
+                    "copy",
+                    str(output_path),
+                ],
                 timeout=dl_timeout,
             )
             if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
@@ -1882,15 +2447,21 @@ def download_audio(audio_url: str, output_path: Path) -> bool:
             error(f"HLS 下载失败: {result.stderr.strip()[-800:]}")
             return False
 
-        result = run_command(
-            ["curl", "-L", "-C", "-", "--max-time", str(dl_timeout), "-o", str(output_path), audio_url],
-            timeout=dl_timeout + 60,
+        max_audio_bytes = int(
+            os.environ.get("MAX_AUDIO_BYTES", str(2 * 1024 * 1024 * 1024))
         )
-        if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+        downloaded = download_http_resource(
+            audio_url,
+            output_path,
+            max_bytes=max_audio_bytes,
+            timeout=dl_timeout,
+            resume=True,
+        )
+        if downloaded.get("ok") and output_path.exists() and output_path.stat().st_size > 0:
             size_mb = output_path.stat().st_size / 1024 / 1024
             log(f"下载完成: {size_mb:.1f} MB")
             return True
-        error(f"下载失败: {result.stderr.strip()}")
+        error(f"下载失败: {downloaded.get('error') or 'unknown error'}")
         return False
     except Exception as exc:
         error(f"下载异常: {exc}")
@@ -1998,6 +2569,343 @@ def clean_transcript_text(text: str) -> str:
             cleaned_lines.append(line)
             prev_empty = False
     return "\n".join(cleaned_lines).strip()
+
+
+def parse_caption_timestamp(value: Any, key: str = "") -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        seconds = float(value)
+        if "millisecond" in key.lower() or key.lower().endswith("ms"):
+            seconds /= 1000
+        return max(0.0, seconds)
+    raw = str(value).strip().replace(",", ".")
+    if not raw:
+        return None
+    if re.fullmatch(r"\d+(?:\.\d+)?", raw):
+        return max(0.0, float(raw))
+    parts = raw.split(":")
+    try:
+        if len(parts) == 2:
+            return max(0.0, float(parts[0]) * 60 + float(parts[1]))
+        if len(parts) == 3:
+            return max(
+                0.0,
+                float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2]),
+            )
+    except ValueError:
+        return None
+    return None
+
+
+def clean_caption_payload(lines: list[str]) -> tuple[str, str | None]:
+    raw = "\n".join(lines).strip()
+    voice = re.search(r"<v(?:\.[^ >]+)*(?:\s+([^>]+))?>", raw, flags=re.IGNORECASE)
+    speaker = clean_text(voice.group(1)) if voice and voice.group(1) else None
+    raw = re.sub(r"</?v(?:\.[^ >]+)*(?:\s+[^>]+)?>", "", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"<\d{2}:\d{2}(?::\d{2})?\.\d{3}>", "", raw)
+    raw = re.sub(r"<[^>]+>", "", raw)
+    return clean_transcript_text(html.unescape(raw)), speaker
+
+
+def parse_caption_document(document: str, *, webvtt: bool) -> list[dict[str, Any]]:
+    lines = document.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    segments: list[dict[str, Any]] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index].strip()
+        if not line or (webvtt and line.upper().startswith(("WEBVTT", "NOTE", "STYLE", "REGION"))):
+            index += 1
+            continue
+        timing_line = line
+        if "-->" not in timing_line and index + 1 < len(lines):
+            timing_line = lines[index + 1].strip()
+            if "-->" in timing_line:
+                index += 1
+        if "-->" not in timing_line:
+            index += 1
+            continue
+        start_raw, end_part = [part.strip() for part in timing_line.split("-->", 1)]
+        end_raw = end_part.split()[0] if end_part else ""
+        start = parse_caption_timestamp(start_raw)
+        end = parse_caption_timestamp(end_raw)
+        index += 1
+        payload: list[str] = []
+        while index < len(lines) and lines[index].strip():
+            payload.append(lines[index])
+            index += 1
+        text, speaker = clean_caption_payload(payload)
+        if text and start is not None:
+            segment: dict[str, Any] = {
+                "start": start,
+                "end": max(start, end if end is not None else start),
+                "text": text,
+            }
+            if speaker:
+                segment["speaker"] = speaker
+            segments.append(segment)
+    return segments
+
+
+def parse_json_transcript(document: str) -> tuple[str, list[dict[str, Any]]]:
+    value = json.loads(document)
+    segments: list[dict[str, Any]] = []
+    text_keys = ("text", "body", "content", "transcript")
+    start_keys = ("start", "startTime", "start_time", "offset", "from", "startMs")
+    end_keys = ("end", "endTime", "end_time", "to", "endMs")
+
+    def visit(node: Any) -> None:
+        if isinstance(node, dict):
+            text_key = next(
+                (key for key in text_keys if isinstance(node.get(key), str)),
+                None,
+            )
+            start_key = next((key for key in start_keys if key in node), None)
+            if text_key and start_key:
+                start = parse_caption_timestamp(node.get(start_key), start_key)
+                end_key = next((key for key in end_keys if key in node), None)
+                end = parse_caption_timestamp(node.get(end_key), end_key or "")
+                text = clean_transcript_text(str(node.get(text_key) or ""))
+                if text and start is not None:
+                    segment: dict[str, Any] = {
+                        "start": start,
+                        "end": max(start, end if end is not None else start),
+                        "text": text,
+                    }
+                    speaker = node.get("speaker") or node.get("speakerName") or node.get("speaker_name")
+                    if isinstance(speaker, str) and speaker.strip():
+                        segment["speaker"] = clean_text(speaker)
+                    segments.append(segment)
+                    return
+            for child in node.values():
+                visit(child)
+        elif isinstance(node, list):
+            for child in node:
+                visit(child)
+
+    visit(value)
+    if segments:
+        segments.sort(key=lambda item: (float(item["start"]), float(item["end"])))
+        for index, segment in enumerate(segments[:-1]):
+            if float(segment["end"]) <= float(segment["start"]):
+                segment["end"] = max(float(segment["start"]), float(segments[index + 1]["start"]))
+        text = "\n".join(str(segment["text"]) for segment in segments)
+        return clean_transcript_text(text), segments
+
+    if isinstance(value, dict):
+        for key in text_keys:
+            if isinstance(value.get(key), str):
+                return clean_transcript_text(value[key]), []
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return clean_transcript_text("\n".join(value)), []
+    return "", []
+
+
+def publisher_transcript_extension(media_type: str, url: str) -> str:
+    normalized = media_type.lower().split(";", 1)[0].strip()
+    mapping = {
+        "text/vtt": ".vtt",
+        "application/x-subrip": ".srt",
+        "text/srt": ".srt",
+        "application/json": ".json",
+        "application/json+transcript": ".json",
+        "text/html": ".html",
+        "text/plain": ".txt",
+    }
+    if normalized in mapping:
+        return mapping[normalized]
+    suffix = Path(urlparse(url).path).suffix.lower()
+    return suffix if suffix in {".vtt", ".srt", ".json", ".html", ".htm", ".txt"} else ".txt"
+
+
+def parse_publisher_transcript(path: Path, media_type: str) -> tuple[str, list[dict[str, Any]]]:
+    document = path.read_text(encoding="utf-8-sig", errors="replace")
+    normalized = media_type.lower().split(";", 1)[0].strip()
+    suffix = path.suffix.lower()
+    if normalized == "text/vtt" or suffix == ".vtt":
+        segments = parse_caption_document(document, webvtt=True)
+        return clean_transcript_text("\n".join(item["text"] for item in segments)), segments
+    if normalized in {"application/x-subrip", "text/srt"} or suffix == ".srt":
+        segments = parse_caption_document(document, webvtt=False)
+        return clean_transcript_text("\n".join(item["text"] for item in segments)), segments
+    if "json" in normalized or suffix == ".json":
+        return parse_json_transcript(document)
+    if normalized == "text/html" or suffix in {".html", ".htm"}:
+        return clean_transcript_text(clean_text(document)), []
+    return clean_transcript_text(document), []
+
+
+def load_publisher_transcript(
+    info: dict[str, Any],
+    transcript_dir: Path,
+    combined_name: str,
+) -> dict[str, Any] | None:
+    candidates = [
+        dict(item)
+        for item in info.get("transcripts") or []
+        if isinstance(item, dict) and item.get("url") and item.get("type")
+    ]
+    if not candidates:
+        return None
+
+    preferred_language = str(info.get("language") or "").lower()
+    type_scores = {
+        "text/vtt": 50,
+        "application/x-subrip": 45,
+        "text/srt": 45,
+        "application/json": 40,
+        "application/json+transcript": 40,
+        "text/plain": 25,
+        "text/html": 20,
+    }
+
+    def candidate_score(candidate: dict[str, Any]) -> int:
+        score = type_scores.get(str(candidate.get("type") or "").lower(), 0)
+        if str(candidate.get("rel") or "").lower() == "captions":
+            score += 10
+        language = str(candidate.get("language") or "").lower()
+        if preferred_language and language.startswith(preferred_language.split("-", 1)[0]):
+            score += 5
+        return score
+
+    max_bytes = int(os.environ.get("PUBLISHER_TRANSCRIPT_MAX_BYTES", str(100 * 1024 * 1024)))
+    for index, candidate in enumerate(sorted(candidates, key=candidate_score, reverse=True), start=1):
+        source_url = str(candidate["url"])
+        media_type = str(candidate["type"])
+        extension = publisher_transcript_extension(media_type, source_url)
+        source_path = transcript_dir / f"{combined_name}_publisher_{index:02d}{extension}"
+        downloaded = download_http_resource(
+            source_url,
+            source_path,
+            max_bytes=max_bytes,
+            timeout=120,
+        )
+        if not downloaded.get("ok"):
+            warn(f"发布方转录获取失败，将尝试下一格式: {source_url} ({downloaded.get('error')})")
+            source_path.unlink(missing_ok=True)
+            continue
+        try:
+            text, segments = parse_publisher_transcript(source_path, media_type)
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            warn(f"发布方转录解析失败，将尝试下一格式: {source_url} ({exc})")
+            source_path.unlink(missing_ok=True)
+            continue
+        if len(text) < 20:
+            warn(f"发布方转录内容过短，将尝试下一格式: {source_url}")
+            source_path.unlink(missing_ok=True)
+            continue
+        quality_issue = transcription_quality_issue(
+            {"text": text, "segments": segments},
+            float(info.get("duration_minutes") or 0.0),
+        )
+        if quality_issue:
+            warn(f"发布方转录完整性检查未通过，将尝试下一格式: {quality_issue}")
+            source_path.unlink(missing_ok=True)
+            continue
+
+        source = {
+            **candidate,
+            **downloaded,
+            "path": str(source_path),
+            "segment_count": len(segments),
+        }
+        info["publisher_transcript"] = source
+        return {
+            "text": text,
+            "segments": segments,
+            "language": candidate.get("language") or info.get("language") or "unknown",
+            "model": f"publisher-transcript:{media_type}",
+            "source": "publisher_transcript",
+            "source_url": source_url,
+            "source_path": str(source_path),
+            "initial_prompt": "",
+        }
+    return None
+
+
+def archive_episode_chapters(
+    info: dict[str, Any],
+    transcript_dir: Path,
+    combined_name: str,
+) -> dict[str, Any] | None:
+    chapter_source = info.get("chapters")
+    if not isinstance(chapter_source, dict) or not chapter_source.get("url"):
+        return None
+
+    source_url = str(chapter_source["url"])
+    source_path = transcript_dir / f"{combined_name}_chapters.source.json"
+    chapter_path = transcript_dir / f"{combined_name}_chapters.json"
+    downloaded = download_http_resource(
+        source_url,
+        source_path,
+        max_bytes=int(os.environ.get("PODCAST_CHAPTERS_MAX_BYTES", str(10 * 1024 * 1024))),
+        timeout=90,
+    )
+    archive: dict[str, Any] = {
+        **downloaded,
+        "source_url": source_url,
+        "source_path": str(source_path),
+        "path": None,
+        "chapter_count": 0,
+    }
+    if not downloaded.get("ok"):
+        archive["failure_reason"] = downloaded.get("error") or "download failed"
+        info["chapters_archive"] = archive
+        warn(f"章节文件下载失败，继续处理转录: {source_url}")
+        return archive
+
+    try:
+        source_payload = json.loads(source_path.read_text(encoding="utf-8-sig"))
+        if not isinstance(source_payload, dict):
+            raise ValueError("chapter document is not a JSON object")
+        raw_chapters = source_payload.get("chapters")
+        if not isinstance(raw_chapters, list):
+            raise ValueError("chapter document has no chapters array")
+        chapters: list[dict[str, Any]] = []
+        for raw_chapter in raw_chapters:
+            if not isinstance(raw_chapter, dict):
+                continue
+            try:
+                start_time = max(0.0, float(raw_chapter.get("startTime")))
+            except (TypeError, ValueError):
+                continue
+            title = clean_text(str(raw_chapter.get("title") or ""))
+            chapter = {**raw_chapter, "startTime": start_time}
+            if title:
+                chapter["title"] = title
+            chapters.append(chapter)
+        chapters.sort(key=lambda item: float(item["startTime"]))
+        if not chapters:
+            raise ValueError("chapter document contains no valid chapters")
+        normalized = {
+            "version": source_payload.get("version") or "1.2.0",
+            "chapters": chapters,
+            "source_url": source_url,
+            "archived_at": iso_timestamp(),
+        }
+        atomic_write_text(
+            chapter_path,
+            json.dumps(normalized, ensure_ascii=False, indent=2) + "\n",
+        )
+        archive.update(
+            {
+                "ok": True,
+                "path": str(chapter_path),
+                "chapter_count": len(chapters),
+                "version": normalized["version"],
+            }
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+        archive.update(
+            {
+                "ok": False,
+                "error": str(exc),
+                "failure_reason": str(exc),
+            }
+        )
+        warn(f"章节文件解析失败，继续处理转录: {source_url}: {exc}")
+    info["chapters_archive"] = archive
+    return archive
 
 
 def vad_segment_audio(wav_path: Path) -> list[tuple[float, float]]:
@@ -2475,28 +3383,49 @@ def build_agent_instruction(
     transcript_path: Path,
     segments_path: Path,
     srt_path: Path,
+    vtt_path: Path,
     metadata_path: Path,
     chunk_command: str,
     info: dict[str, Any],
     transcript_chars: int,
     output_dir: Path,
     combined_name: str,
+    job_id: str | None = None,
+    job_status_path: Path | None = None,
+    job_result_path: Path | None = None,
 ) -> str:
     duration = info.get("duration_minutes", 0.0)
     target_words = target_summary_words(duration)
     guests_text = ", ".join(info.get("guests") or []) or "未自动识别"
     report_path = output_dir / "总结稿" / f"{combined_name}_详细总结.md"
     workflow_path = Path(__file__).with_name("references") / "report-workflow.md"
+    job_lines = ""
+    verification_step = ""
+    if job_id:
+        job_lines = (
+            f"- 作业 ID：{job_id}\n"
+            f"- 作业状态：{job_status_path}\n"
+            f"- 作业结果：{job_result_path}\n"
+        )
+        verification_step = (
+            "8. 总结稿写入后执行完整性核验；只有该命令成功，作业才从 "
+            "`awaiting_report` 变为 `completed`：\n"
+            f'   "{sys.executable}" "{Path(__file__).resolve()}" '
+            f'--output-dir "{output_dir}" --verify "{job_id}" --require-report\n'
+        )
     return f"""请按 SKILL.md 和报告工作流继续完成播客总结。
 
 输入文件：
 - 转录稿：{transcript_path}
 - 时间戳分段：{segments_path}
 - SRT 字幕：{srt_path}
+- WebVTT 字幕：{vtt_path}
 - 元数据：{metadata_path}
 - 报告工作流：{workflow_path}
 {f"- Show Notes Markdown：{info.get('shownotes_archive', {}).get('markdown_path')}" if info.get('shownotes_archive') else ""}
 {f"- Show Notes 图片/链接 Manifest：{info.get('shownotes_archive', {}).get('manifest_path')}" if info.get('shownotes_archive') else ""}
+{f"- Podcasting 2.0 章节：{info.get('chapters_archive', {}).get('path')}" if info.get('chapters_archive', {}).get('ok') else ""}
+{job_lines}
 
 播客信息：
 - 节目名称：{info.get('show_title', '未知节目')}
@@ -2523,10 +3452,11 @@ def build_agent_instruction(
    - [ ] 包含背景与术语、实用资源、延伸思考与局限
    - [ ] 正文字数 ≥ {target_words} 字（不含 Show Notes）
    - [ ] 包含原始 Show Notes
-   - [ ] 包含独立转录稿、segments、SRT 的相对链接，且未嵌入完整转录正文
+   - [ ] 包含独立转录稿、segments、SRT、WebVTT 的相对链接，且未嵌入完整转录正文
 
    写入最终目标文件：
    {report_path}
+{verification_step}
 """
 
 
@@ -2536,6 +3466,10 @@ def format_srt_timestamp(seconds: float) -> str:
     minutes, remainder = divmod(remainder, 60_000)
     secs, millis = divmod(remainder, 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def format_vtt_timestamp(seconds: float) -> str:
+    return format_srt_timestamp(seconds).replace(",", ".")
 
 
 def format_transcript_timestamp(seconds: float) -> str:
@@ -2567,6 +3501,7 @@ def render_transcript_document(
     transcript_path: Path,
     segments_path: Path,
     srt_path: Path,
+    vtt_path: Path,
     metadata_path: Path,
 ) -> str:
     segments = list(transcription.get("segments") or [])
@@ -2588,8 +3523,13 @@ def render_transcript_document(
         f"- 语言：{transcription.get('language') or 'unknown'}",
         f"- 生成时间：{generated_at}",
         "",
-        "> 本文件由自动语音识别生成，可能包含人名、专有名词和断句错误。"
-        "时间戳来自 ASR/VAD 分段；没有可靠说话人证据时不推断姓名。",
+        (
+            "> 本文件优先采用播客发布方提供的转录；仍可能包含编辑、断句或时间戳误差。"
+            "没有可靠说话人证据时不推断姓名。"
+            if transcription.get("source") == "publisher_transcript"
+            else "> 本文件由自动语音识别生成，可能包含人名、专有名词和断句错误。"
+            "时间戳来自 ASR/VAD 分段；没有可靠说话人证据时不推断姓名。"
+        ),
         "",
         "---",
         "",
@@ -2625,9 +3565,11 @@ def render_transcript_document(
             else "- 原始页面：未获取",
             f"- 时间戳分段：{relative_markdown_link('打开 JSON', segments_path, transcript_dir)}",
             f"- SRT 字幕：{relative_markdown_link('打开 SRT', srt_path, transcript_dir)}",
+            f"- WebVTT 字幕：{relative_markdown_link('打开 VTT', vtt_path, transcript_dir)}",
             f"- 元数据：{relative_markdown_link('打开 JSON', metadata_path, transcript_dir)}",
             f"- Show Notes：{relative_markdown_link('打开 Markdown', archive.get('markdown_path'), transcript_dir)}",
             f"- 媒体清单：{relative_markdown_link('打开 JSON', archive.get('manifest_path'), transcript_dir)}",
+            f"- Podcasting 2.0 章节：{relative_markdown_link('打开 JSON', (info.get('chapters_archive') or {}).get('path'), transcript_dir)}",
             "",
             "--- 转录稿结束 ---",
             "",
@@ -2655,10 +3597,12 @@ def extract_transcript_body(document: str) -> str:
 def write_transcript_segments(
     segments_path: Path,
     srt_path: Path,
+    vtt_path: Path,
     segments: list[dict[str, Any]],
 ) -> None:
     normalized: list[dict[str, Any]] = []
     srt_blocks: list[str] = []
+    vtt_blocks: list[str] = []
     for index, segment in enumerate(segments, start=1):
         text = clean_transcript_text(str(segment.get("text") or ""))
         if not text:
@@ -2674,11 +3618,20 @@ def write_transcript_segments(
         srt_blocks.append(
             f"{len(normalized)}\n{format_srt_timestamp(start)} --> {format_srt_timestamp(end)}\n{srt_text}"
         )
-    segments_path.write_text(
+        vtt_text = html.escape(text, quote=False)
+        if speaker:
+            voice = re.sub(r"[<>\r\n]+", " ", speaker).strip()
+            vtt_text = f"<v {voice}>{vtt_text}"
+        vtt_blocks.append(
+            f"{format_vtt_timestamp(start)} --> {format_vtt_timestamp(end)}\n{vtt_text}"
+        )
+    atomic_write_text(
+        segments_path,
         json.dumps(normalized, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
     )
-    srt_path.write_text("\n\n".join(srt_blocks) + ("\n" if srt_blocks else ""), encoding="utf-8")
+    atomic_write_text(srt_path, "\n\n".join(srt_blocks) + ("\n" if srt_blocks else ""))
+    vtt_body = "\n\n".join(vtt_blocks)
+    atomic_write_text(vtt_path, "WEBVTT\n\n" + vtt_body + ("\n" if vtt_body else ""))
 
 
 def write_metadata(
@@ -2688,30 +3641,454 @@ def write_metadata(
     transcript_path: Path,
     segments_path: Path,
     srt_path: Path,
+    vtt_path: Path,
 ) -> None:
     metadata = {
         "episode": info,
         "transcription": {
             "model": transcription.get("model"),
+            "source": transcription.get("source") or "asr",
+            "source_url": transcription.get("source_url"),
+            "source_path": transcription.get("source_path"),
             "language": transcription.get("language"),
             "initial_prompt": transcription.get("initial_prompt"),
             "transcript_path": str(transcript_path),
             "segments_path": str(segments_path),
             "srt_path": str(srt_path),
+            "vtt_path": str(vtt_path),
+            "chapters_path": (info.get("chapters_archive") or {}).get("path"),
             "segment_count": len(transcription.get("segments") or []),
             "transcript_chars": len(transcription.get("text", "")),
             "diarization": transcription.get("diarization"),
             "processed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         },
     }
-    path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(
+        path,
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+    )
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    path = path.expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temp_path.write_text(content, encoding="utf-8")
+    os.replace(temp_path, path)
+
+
+def read_json_object(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"expected JSON object: {path}")
+    return value
+
+
+JOB_PHASE_PROGRESS = {
+    "created": 0,
+    "resolving": 10,
+    "archiving": 25,
+    "acquiring_transcript": 40,
+    "downloading_audio": 50,
+    "transcribing": 70,
+    "writing_outputs": 90,
+    "awaiting_report": 95,
+    "verifying": 98,
+    "completed": 100,
+    "failed": 100,
+}
+
+
+class JobTracker:
+    def __init__(self, job_dir: Path, state: dict[str, Any], *, resumed: bool = False):
+        self.job_dir = job_dir
+        self.job_path = job_dir / "job.json"
+        self.status_path = job_dir / "status.json"
+        self.result_path = job_dir / "result.json"
+        self.state = state
+        self.resumed = resumed
+
+    @classmethod
+    def create(
+        cls,
+        output_dir: Path,
+        user_input: str,
+        args: argparse.Namespace,
+    ) -> "JobTracker":
+        jobs_dir = output_dir / ".jobs"
+        jobs_dir.mkdir(parents=True, exist_ok=True)
+        requested_id = str(getattr(args, "job_id", "") or "").strip()
+        if requested_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", requested_id):
+            raise ValueError("--job-id only accepts letters, digits, dot, underscore and hyphen")
+        digest = hashlib.sha256(user_input.encode("utf-8")).hexdigest()[:8]
+        job_id = requested_id or f"{time.strftime('%Y%m%d-%H%M%S')}-{digest}"
+        job_dir = jobs_dir / job_id
+        if job_dir.exists():
+            raise FileExistsError(f"job already exists; use --resume {job_id}")
+        job_dir.mkdir(parents=True)
+        mode = "archive-only" if getattr(args, "archive_only", False) else "transcribe"
+        now = iso_timestamp()
+        state: dict[str, Any] = {
+            "schema_version": 1,
+            "job_id": job_id,
+            "input": user_input,
+            "mode": mode,
+            "status": "running",
+            "current_phase": "created",
+            "progress": 0,
+            "created_at": now,
+            "updated_at": now,
+            "report_status": "not_required" if mode == "archive-only" else "pending",
+            "phases": [],
+            "checkpoints": {},
+            "options": {
+                "engine": getattr(args, "engine", None),
+                "model": getattr(args, "model", None),
+                "keep_audio": bool(getattr(args, "keep_audio", False)),
+                "force_transcribe": bool(getattr(args, "force_transcribe", False)),
+                "shownotes_assets": getattr(args, "shownotes_assets", None),
+                "link_snapshot": getattr(args, "link_snapshot", None),
+                "sync_backend": getattr(args, "sync_backend", None),
+                "sync_destination": getattr(args, "sync_destination", None),
+                "public_base_url": getattr(args, "public_base_url", None),
+                "sync_required": bool(getattr(args, "sync_required", False)),
+                "diarize": bool(getattr(args, "diarize", False)),
+            },
+            "paths": {
+                "job_dir": str(job_dir),
+                "job_path": str(job_dir / "job.json"),
+                "status_path": str(job_dir / "status.json"),
+                "result_path": str(job_dir / "result.json"),
+            },
+            "error": None,
+        }
+        tracker = cls(job_dir, state)
+        tracker.persist()
+        return tracker
+
+    @classmethod
+    def resume(cls, output_dir: Path, job_id: str) -> "JobTracker":
+        jobs_dir = output_dir / ".jobs"
+        if job_id == "latest":
+            candidates = sorted(
+                jobs_dir.glob("*/job.json"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+            if not candidates:
+                raise FileNotFoundError("no jobs found to resume")
+            job_path = candidates[0]
+        else:
+            job_path = jobs_dir / job_id / "job.json"
+        state = read_json_object(job_path)
+        tracker = cls(job_path.parent, state, resumed=True)
+        tracker.state["status"] = "running"
+        tracker.state["error"] = None
+        tracker.state["resumed_at"] = iso_timestamp()
+        tracker.persist()
+        return tracker
+
+    @property
+    def job_id(self) -> str:
+        return str(self.state["job_id"])
+
+    def status_summary(self) -> dict[str, Any]:
+        return {
+            "job_id": self.job_id,
+            "status": self.state.get("status"),
+            "current_phase": self.state.get("current_phase"),
+            "progress": self.state.get("progress", 0),
+            "report_status": self.state.get("report_status"),
+            "updated_at": self.state.get("updated_at"),
+            "error": self.state.get("error"),
+            "result_path": str(self.result_path) if self.result_path.exists() else None,
+            "report_path": (self.state.get("paths") or {}).get("report_path"),
+        }
+
+    def persist(self) -> None:
+        self.state["updated_at"] = iso_timestamp()
+        atomic_write_text(
+            self.job_path,
+            json.dumps(self.state, ensure_ascii=False, indent=2) + "\n",
+        )
+        atomic_write_text(
+            self.status_path,
+            json.dumps(self.status_summary(), ensure_ascii=False, indent=2) + "\n",
+        )
+
+    def phase(self, name: str, detail: str | None = None) -> None:
+        now = iso_timestamp()
+        phases = self.state.setdefault("phases", [])
+        for phase in reversed(phases):
+            if phase.get("status") == "running":
+                phase["status"] = "completed"
+                phase["completed_at"] = now
+                break
+        phases.append(
+            {
+                "name": name,
+                "status": "running",
+                "started_at": now,
+                **({"detail": detail} if detail else {}),
+            }
+        )
+        self.state["status"] = "running"
+        self.state["current_phase"] = name
+        self.state["progress"] = JOB_PHASE_PROGRESS.get(name, self.state.get("progress", 0))
+        self.persist()
+
+    def checkpoint(self, name: str, value: Any) -> None:
+        self.state.setdefault("checkpoints", {})[name] = value
+        self.persist()
+
+    def finish(self, payload: dict[str, Any], *, awaiting_report: bool) -> dict[str, Any]:
+        now = iso_timestamp()
+        for phase in reversed(self.state.setdefault("phases", [])):
+            if phase.get("status") == "running":
+                phase["status"] = "completed"
+                phase["completed_at"] = now
+                break
+        status = "awaiting_report" if awaiting_report else "completed"
+        enriched = {
+            **payload,
+            "job_id": self.job_id,
+            "job_status": status,
+            "job_path": str(self.job_path),
+            "status_path": str(self.status_path),
+            "result_path": str(self.result_path),
+        }
+        atomic_write_text(
+            self.result_path,
+            json.dumps(enriched, ensure_ascii=False, indent=2) + "\n",
+        )
+        self.state["status"] = status
+        self.state["current_phase"] = status
+        self.state["progress"] = JOB_PHASE_PROGRESS.get(status, 100)
+        self.state["report_status"] = "pending" if awaiting_report else "not_required"
+        self.state.setdefault("paths", {})["result_path"] = str(self.result_path)
+        if enriched.get("report_path"):
+            self.state["paths"]["report_path"] = enriched["report_path"]
+        self.persist()
+        return enriched
+
+    def fail(self, reason: str) -> None:
+        now = iso_timestamp()
+        for phase in reversed(self.state.setdefault("phases", [])):
+            if phase.get("status") == "running":
+                phase["status"] = "failed"
+                phase["failed_at"] = now
+                phase["error"] = reason
+                break
+        self.state["status"] = "failed"
+        self.state["current_phase"] = "failed"
+        self.state["progress"] = 100
+        self.state["error"] = reason
+        self.persist()
+
+    def mark_report_complete(self) -> None:
+        self.state["status"] = "completed"
+        self.state["current_phase"] = "completed"
+        self.state["progress"] = 100
+        self.state["report_status"] = "verified"
+        self.state["error"] = None
+        self.state["completed_at"] = iso_timestamp()
+        if self.result_path.is_file():
+            result = read_json_object(self.result_path)
+            result["job_status"] = "completed"
+            result["report_verified_at"] = self.state["completed_at"]
+            atomic_write_text(
+                self.result_path,
+                json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+            )
+        self.persist()
+
+
+ACTIVE_JOB: JobTracker | None = None
+
+
+def archive_checkpoint_is_usable(archive: Any) -> bool:
+    if not isinstance(archive, dict):
+        return False
+    required = ("raw_html_path", "markdown_path", "manifest_path")
+    return all(archive.get(key) and Path(archive[key]).is_file() for key in required)
+
+
+def resolve_verify_target(output_dir: Path, target: str) -> tuple[Path, Path | None]:
+    candidate = Path(target).expanduser()
+    if candidate.is_dir():
+        result_path = candidate / "result.json"
+        job_path = candidate / "job.json"
+        return result_path, job_path if job_path.is_file() else None
+    if candidate.is_file():
+        job_path = candidate.parent / "job.json" if candidate.name == "result.json" else None
+        return candidate, job_path if job_path and job_path.is_file() else None
+    job_dir = output_dir / ".jobs" / target
+    return job_dir / "result.json", job_dir / "job.json"
+
+
+def verify_result_artifacts(
+    result: dict[str, Any],
+    *,
+    require_report: bool = False,
+) -> dict[str, Any]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    checks: list[dict[str, Any]] = []
+
+    def check_file(name: str, raw_path: Any, *, required: bool = True) -> Path | None:
+        if not raw_path:
+            if required:
+                errors.append(f"missing path: {name}")
+            return None
+        path = Path(str(raw_path)).expanduser()
+        ok = path.is_file()
+        checks.append({"name": name, "path": str(path), "ok": ok})
+        if required and not ok:
+            errors.append(f"missing file: {name}: {path}")
+        return path if ok else None
+
+    mode = result.get("mode")
+    metadata_path = check_file("metadata", result.get("metadata_path"))
+    transcript_path = None
+    if mode == "transcribe":
+        transcript_path = check_file("transcript", result.get("transcript_path"))
+        segments_path = check_file("segments", result.get("segments_path"))
+        check_file("srt", result.get("srt_path"))
+        vtt_path = check_file("vtt", result.get("vtt_path"))
+        check_file("instruction", result.get("instruction_path"))
+        if segments_path:
+            try:
+                if not isinstance(json.loads(segments_path.read_text(encoding="utf-8")), list):
+                    errors.append(f"segments JSON is not an array: {segments_path}")
+            except (OSError, json.JSONDecodeError) as exc:
+                errors.append(f"segments JSON is invalid: {segments_path}: {exc}")
+        if vtt_path and not vtt_path.read_text(encoding="utf-8").startswith("WEBVTT"):
+            errors.append(f"WebVTT header is missing: {vtt_path}")
+
+    if metadata_path:
+        try:
+            read_json_object(metadata_path)
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            errors.append(f"metadata JSON is invalid: {metadata_path}: {exc}")
+
+    archive = result.get("shownotes_archive") or {}
+    if archive:
+        markdown_path = check_file("shownotes_markdown", archive.get("markdown_path"))
+        check_file("shownotes_raw_html", archive.get("raw_html_path"))
+        manifest_path = check_file("shownotes_manifest", archive.get("manifest_path"))
+        if manifest_path:
+            try:
+                manifest = read_json_object(manifest_path)
+                for image in manifest.get("images") or []:
+                    if image.get("ok") and image.get("path"):
+                        image_path = Path(str(image["path"])).expanduser()
+                        if not image_path.is_file():
+                            errors.append(f"archived image is missing: {image_path}")
+                    elif image.get("error"):
+                        warnings.append(
+                            f"image unavailable, online URL retained: {image.get('source_url')}: {image.get('error')}"
+                        )
+                for link in manifest.get("links") or []:
+                    snapshot = link.get("snapshot") or {}
+                    if snapshot.get("status") == "complete" and snapshot.get("path"):
+                        snapshot_path = Path(str(snapshot["path"])).expanduser()
+                        if not snapshot_path.exists():
+                            errors.append(f"link snapshot is missing: {snapshot_path}")
+                    elif snapshot.get("status") == "failed":
+                        warnings.append(
+                            f"link snapshot failed, online URL retained: {link.get('url')}: {snapshot.get('reason')}"
+                        )
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                errors.append(f"Show Notes manifest is invalid: {manifest_path}: {exc}")
+        if markdown_path:
+            markdown = markdown_path.read_text(encoding="utf-8")
+            for raw_link in re.findall(r"!\[[^\]]*\]\((?:<)?([^)>]+)(?:>)?\)", markdown):
+                if urlparse(raw_link).scheme in {"http", "https"}:
+                    continue
+                image_path = (markdown_path.parent / raw_link).resolve()
+                if not image_path.is_file():
+                    errors.append(f"Show Notes image link is broken: {raw_link}")
+
+    raw_chapters_path = result.get("chapters_path")
+    chapters_path = check_file(
+        "chapters",
+        raw_chapters_path,
+        required=bool(raw_chapters_path),
+    )
+    if chapters_path:
+        try:
+            chapters_payload = read_json_object(chapters_path)
+            if not isinstance(chapters_payload.get("chapters"), list):
+                errors.append(f"chapters JSON has no chapters array: {chapters_path}")
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            errors.append(f"chapters JSON is invalid: {chapters_path}: {exc}")
+
+    report_path = None
+    if mode == "transcribe":
+        report_path = check_file("report", result.get("report_path"), required=False)
+        if not report_path:
+            message = f"report is not generated yet: {result.get('report_path') or 'unknown path'}"
+            if require_report:
+                errors.append(message)
+            else:
+                warnings.append(message)
+        else:
+            report = report_path.read_text(encoding="utf-8")
+            for raw_link in re.findall(r"\[[^\]]+\]\((?:<)?([^)>]+)(?:>)?\)", report):
+                parsed = urlparse(raw_link)
+                if parsed.scheme or raw_link.startswith("#"):
+                    continue
+                linked_path = (report_path.parent / raw_link).resolve()
+                if not linked_path.exists():
+                    errors.append(f"report link is broken: {raw_link}")
+
+    return {
+        "ok": not errors,
+        "mode": mode,
+        "job_id": result.get("job_id"),
+        "report_present": bool(report_path),
+        "checks": checks,
+        "errors": errors,
+        "warnings": warnings,
+        "verified_at": iso_timestamp(),
+    }
+
+
+def run_verify(output_dir: Path, target: str, *, require_report: bool) -> int:
+    result_path, job_path = resolve_verify_target(output_dir, target)
+    if not result_path.is_file():
+        payload = {
+            "ok": False,
+            "errors": [f"result.json not found: {result_path}"],
+            "status_path": str(job_path.parent / "status.json") if job_path else None,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 1
+    try:
+        result = read_json_object(result_path)
+        verification = verify_result_artifacts(result, require_report=require_report)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        print(json.dumps({"ok": False, "errors": [str(exc)]}, ensure_ascii=False, indent=2))
+        return 1
+
+    verification_path = result_path.with_name("verification.json")
+    atomic_write_text(
+        verification_path,
+        json.dumps(verification, ensure_ascii=False, indent=2) + "\n",
+    )
+    verification["verification_path"] = str(verification_path)
+    if verification["ok"] and verification["report_present"] and job_path and job_path.is_file():
+        tracker = JobTracker(job_path.parent, read_json_object(job_path), resumed=True)
+        tracker.mark_report_complete()
+    print(json.dumps(verification, ensure_ascii=False, indent=2))
+    return 0 if verification["ok"] else 1
 
 
 def parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="解析、归档并转录播客链接、RSS、媒体页面或节目搜索词。"
     )
-    parser.add_argument("input", nargs="+", help="单集链接、带标题链接或搜索关键词")
+    parser.add_argument("input", nargs="*", help="单集链接、带标题链接或搜索关键词")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--resolve-only",
@@ -2742,6 +4119,11 @@ def parse_cli_args() -> argparse.Namespace:
         help="覆盖 SHOWNOTES_ASSETS",
     )
     parser.add_argument(
+        "--link-snapshot",
+        choices=tuple(sorted(SHOWNOTES_LINK_SNAPSHOT_MODES)),
+        help="可选地用 SingleFile 或 ArchiveBox 保存 Show Notes 外链页面",
+    )
+    parser.add_argument(
         "--sync-backend",
         choices=("local", "webdav", "s3"),
         help="同步 Show Notes 到本地同步盘、WebDAV 或 S3/R2",
@@ -2758,14 +4140,45 @@ def parse_cli_args() -> argparse.Namespace:
         action="store_true",
         help="使用 pyannote 为时间戳分段添加说话人标签",
     )
-    return parser.parse_args()
+    parser.add_argument("--job-id", help="为新任务指定便于识别的 ID")
+    parser.add_argument(
+        "--resume",
+        metavar="JOB_ID",
+        help="恢复 output-dir/.jobs 下的任务；使用 latest 恢复最近任务",
+    )
+    parser.add_argument(
+        "--verify",
+        metavar="JOB_ID_OR_RESULT",
+        help="核验 result.json 及其产物，不执行解析或转录",
+    )
+    parser.add_argument(
+        "--require-report",
+        action="store_true",
+        help="核验时要求正式总结稿已经生成",
+    )
+    args = parser.parse_args()
+    if not args.input and not args.resume and not args.verify:
+        parser.error("请提供播客输入，或使用 --resume / --verify")
+    if args.verify and (args.input or args.resume):
+        parser.error("--verify 不能与播客输入或 --resume 同时使用")
+    if args.verify and args.archive_only:
+        parser.error("--verify 不能与 --archive-only 同时使用")
+    if args.resume and args.input:
+        parser.error("--resume 不能与新的播客输入同时使用")
+    if args.resume and args.job_id:
+        parser.error("--resume 不能与 --job-id 同时使用")
+    if args.resolve_only and (args.resume or args.verify):
+        parser.error("--resolve-only 不能与 --resume / --verify 同时使用")
+    if args.require_report and not args.verify:
+        parser.error("--require-report 只能与 --verify 同时使用")
+    return args
 
 
 def emit_result(payload: dict[str, Any], *, print_json: bool = False) -> None:
     serialized = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     result_json_path = os.environ.get("RESULT_JSON")
     if result_json_path:
-        Path(result_json_path).expanduser().write_text(serialized, encoding="utf-8")
+        atomic_write_text(Path(result_json_path), serialized)
     if print_json:
         print(serialized, end="")
 
@@ -2894,6 +4307,9 @@ def load_cached_transcription(
             "segments": segments,
             "language": transcription_metadata.get("language") or "unknown",
             "model": transcription_metadata.get("model") or "cached-unknown",
+            "source": transcription_metadata.get("source") or "cached",
+            "source_url": transcription_metadata.get("source_url"),
+            "source_path": transcription_metadata.get("source_path"),
             "initial_prompt": transcription_metadata.get("initial_prompt") or "",
             "diarization": transcription_metadata.get("diarization"),
         },
@@ -2902,22 +4318,72 @@ def load_cached_transcription(
 
 
 def main() -> None:
+    global ACTIVE_JOB
+    ACTIVE_JOB = None
     args = parse_cli_args()
-    user_input = " ".join(args.input).strip()
-    asr_engine = (args.engine or os.environ.get("ASR_ENGINE", "sensevoice")).lower().strip()
+    output_dir = Path(
+        getattr(args, "output_dir", None)
+        or os.environ.get("OUTPUT_DIR", str(DEFAULT_OUTPUT_DIR))
+    ).expanduser()
+    if getattr(args, "verify", None):
+        raise SystemExit(
+            run_verify(
+                output_dir,
+                str(args.verify),
+                require_report=bool(getattr(args, "require_report", False)),
+            )
+        )
+
+    tracker: JobTracker | None = None
+    if getattr(args, "resume", None):
+        tracker = JobTracker.resume(output_dir, str(args.resume))
+        options = tracker.state.get("options") or {}
+        if getattr(args, "engine", None) is None:
+            args.engine = options.get("engine")
+        if getattr(args, "model", None) is None:
+            args.model = options.get("model")
+        for name in ("keep_audio", "force_transcribe", "sync_required", "diarize"):
+            if not bool(getattr(args, name, False)):
+                setattr(args, name, bool(options.get(name, False)))
+        for name in (
+            "shownotes_assets",
+            "link_snapshot",
+            "sync_backend",
+            "sync_destination",
+            "public_base_url",
+        ):
+            if getattr(args, name, None) is None:
+                setattr(args, name, options.get(name))
+        args.archive_only = tracker.state.get("mode") == "archive-only"
+        args.resolve_only = False
+        user_input = str(tracker.state.get("input") or "").strip()
+        if not user_input:
+            raise ValueError(f"作业 {tracker.job_id} 缺少原始输入")
+        log(f"恢复作业: {tracker.job_id}")
+    else:
+        user_input = " ".join(getattr(args, "input", [])).strip()
+        if not getattr(args, "resolve_only", False):
+            output_dir.mkdir(parents=True, exist_ok=True)
+            tracker = JobTracker.create(output_dir, user_input, args)
+            log(f"创建作业: {tracker.job_id}")
+    ACTIVE_JOB = tracker
+
+    asr_engine = (
+        getattr(args, "engine", None) or os.environ.get("ASR_ENGINE", "sensevoice")
+    ).lower().strip()
     if asr_engine not in ("sensevoice", "whisper", "stitch"):
         warn(f"ASR_ENGINE 值 '{asr_engine}' 无效，将使用默认值 'sensevoice'")
         asr_engine = "sensevoice"
-    model = args.model or os.environ.get("WHISPER_MODEL", DEFAULT_MODEL)
-    output_dir = Path(
-        args.output_dir or os.environ.get("OUTPUT_DIR", str(DEFAULT_OUTPUT_DIR))
-    ).expanduser()
-    keep_audio = args.keep_audio or os.environ.get("KEEP_AUDIO", "0") == "1"
+    model = getattr(args, "model", None) or os.environ.get("WHISPER_MODEL", DEFAULT_MODEL)
+    keep_audio = bool(getattr(args, "keep_audio", False)) or os.environ.get("KEEP_AUDIO", "0") == "1"
     force_transcribe = (
-        args.force_transcribe or os.environ.get("FORCE_TRANSCRIBE", "0") == "1"
+        bool(getattr(args, "force_transcribe", False))
+        or os.environ.get("FORCE_TRANSCRIBE", "0") == "1"
     )
-    if args.shownotes_assets:
+    if getattr(args, "shownotes_assets", None):
         os.environ["SHOWNOTES_ASSETS"] = args.shownotes_assets
+    if getattr(args, "link_snapshot", None):
+        os.environ["SHOWNOTES_LINK_SNAPSHOT"] = args.link_snapshot
     if getattr(args, "sync_backend", None):
         os.environ["SHOWNOTES_SYNC_BACKEND"] = args.sync_backend
     if getattr(args, "sync_destination", None):
@@ -2931,17 +4397,26 @@ def main() -> None:
     log(f"转录引擎: {asr_engine.upper()}{'（Whisper 备用模型: ' + model + '）' if asr_engine == 'sensevoice' else '（模型: ' + model + '）'}")
 
     log(f"解析输入: {user_input}")
-    info = resolve_episode_info(user_input)
+    if tracker:
+        tracker.phase("resolving")
+    episode_checkpoint = (tracker.state.get("checkpoints") or {}).get("episode") if tracker else None
+    if isinstance(episode_checkpoint, dict):
+        info = dict(episode_checkpoint)
+        log("复用作业检查点中的单集元数据")
+    else:
+        info = resolve_episode_info(user_input)
     if not info:
         error("无法解析播客输入；请换用单集链接、RSS 链接，或补充节目名 + 单集标题关键词")
         sys.exit(1)
+    if tracker and not isinstance(episode_checkpoint, dict):
+        tracker.checkpoint("episode", info)
 
     log(f"标题: {info['title']}")
     log(f"来源: {info.get('source', 'unknown')}")
     if info.get("guests"):
         log(f"嘉宾/说话人候选: {', '.join(info['guests'])}")
 
-    if args.resolve_only:
+    if getattr(args, "resolve_only", False):
         emit_result({"mode": "resolve-only", "episode": info}, print_json=True)
         return
 
@@ -2959,26 +4434,66 @@ def main() -> None:
     transcript_path = transcript_dir / f"{combined_name}_转录稿.txt"
     segments_path = transcript_dir / f"{combined_name}_segments.json"
     srt_path = transcript_dir / f"{combined_name}.srt"
+    vtt_path = transcript_dir / f"{combined_name}.vtt"
     metadata_path = output_dir / f"{combined_name}_metadata.json"
     instruction_path = output_dir / f"{combined_name}_Agent任务指令.txt"
 
-    shownotes_archive = archive_show_notes(info, output_dir, combined_name)
+    if tracker:
+        tracker.phase("archiving")
+    archive_checkpoint = (
+        (tracker.state.get("checkpoints") or {}).get("shownotes_archive")
+        if tracker
+        else None
+    )
+    if archive_checkpoint_is_usable(archive_checkpoint):
+        shownotes_archive = dict(archive_checkpoint)
+        log("复用作业检查点中的 Show Notes 归档")
+    else:
+        shownotes_archive = archive_show_notes(info, output_dir, combined_name)
     if shownotes_archive:
         info["shownotes_archive"] = shownotes_archive
         log(f"   Show Notes: {shownotes_archive['markdown_path']}")
         log(
             f"   Show Notes 图片: {shownotes_archive['image_count']}，链接: {shownotes_archive['link_count']}，模式: {shownotes_archive['mode']}"
         )
-        sync_result = sync_shownotes_if_configured(shownotes_archive)
+        sync_result = shownotes_archive.get("sync") or sync_shownotes_if_configured(
+            shownotes_archive
+        )
         if sync_result:
             shownotes_archive["sync"] = sync_result
             if sync_result.get("status") != "failed":
                 log(
                     f"   Show Notes 已同步: {sync_result['backend']}，{sync_result['file_count']} 个文件"
                 )
+    if tracker and not archive_checkpoint_is_usable(archive_checkpoint):
+        tracker.checkpoint("shownotes_archive", shownotes_archive)
 
-    if args.archive_only:
-        metadata_path.write_text(
+    chapter_checkpoint = (
+        (tracker.state.get("checkpoints") or {}).get("chapters_archive")
+        if tracker
+        else None
+    )
+    if (
+        isinstance(chapter_checkpoint, dict)
+        and chapter_checkpoint.get("ok")
+        and chapter_checkpoint.get("path")
+        and Path(str(chapter_checkpoint["path"])).is_file()
+    ):
+        chapters_archive = dict(chapter_checkpoint)
+        info["chapters_archive"] = chapters_archive
+        log("复用作业检查点中的章节归档")
+    else:
+        chapters_archive = archive_episode_chapters(info, transcript_dir, combined_name)
+        if tracker:
+            tracker.checkpoint("chapters_archive", chapters_archive)
+    if chapters_archive and chapters_archive.get("ok"):
+        log(
+            f"   章节: {chapters_archive['chapter_count']} 个 ({chapters_archive['path']})"
+        )
+
+    if getattr(args, "archive_only", False):
+        atomic_write_text(
+            metadata_path,
             json.dumps(
                 {
                     "episode": info,
@@ -2989,23 +4504,23 @@ def main() -> None:
                 indent=2,
             )
             + "\n",
-            encoding="utf-8",
         )
         payload = {
             "mode": "archive-only",
+            "episode": info,
             "metadata_path": str(metadata_path),
             "shownotes_archive": shownotes_archive,
+            "chapters_archive": chapters_archive,
+            "chapters_path": (
+                chapters_archive.get("path") if chapters_archive and chapters_archive.get("ok") else None
+            ),
         }
+        if tracker:
+            payload = tracker.finish(payload, awaiting_report=False)
         emit_result(payload, print_json=True)
         return
 
-    if not info.get("audio_url"):
-        error("未能提取音频地址，可能网页结构已变更或搜索结果不够精确")
-        print("\n调试信息 - 网页片段:")
-        print((info.get("html_sample") or "N/A")[:500])
-        sys.exit(1)
-
-    parsed_url = urlparse(info["audio_url"])
+    parsed_url = urlparse(str(info.get("audio_url") or ""))
     ext = os.path.splitext(parsed_url.path)[1]
     if not ext or len(ext) > 5 or ext.lower() in {".m3u8", ".m3u"}:
         ext = ".m4a"
@@ -3016,10 +4531,46 @@ def main() -> None:
     audio_created_this_run = False
 
     try:
+        if tracker:
+            tracker.phase("acquiring_transcript")
         cached = None if force_transcribe else load_cached_transcription(
             transcript_path, segments_path, metadata_path, info
         )
-        if cached:
+        cached_model = str(cached[0].get("model") or "") if cached else ""
+        publisher_transcription = None
+        if os.environ.get("PREFER_PUBLISHER_TRANSCRIPT", "1") != "0" and not cached_model.startswith(
+            "publisher-transcript:"
+        ):
+            publisher_transcription = load_publisher_transcript(
+                info,
+                transcript_dir,
+                combined_name,
+            )
+
+        if publisher_transcription:
+            transcription = publisher_transcription
+            log(
+                "使用发布方提供的转录，跳过音频下载与 ASR: "
+                f"{publisher_transcription.get('source_url')}"
+            )
+            has_speaker_labels = any(
+                segment.get("speaker") for segment in transcription.get("segments") or []
+            )
+            if (
+                os.environ.get("DIARIZATION", "0") == "1"
+                and not has_speaker_labels
+                and info.get("audio_url")
+            ):
+                log("发布方转录没有说话人标签，仅下载音频执行说话人识别")
+                if tracker:
+                    tracker.phase("downloading_audio", "为发布方转录补充说话人标签")
+                if download_audio(str(info["audio_url"]), audio_path):
+                    audio_created_this_run = True
+                    diarization_path = audio_path
+                    if preprocess_audio(audio_path, wav_path):
+                        diarization_path = wav_path
+                    diarize_if_configured(diarization_path, transcription)
+        elif cached:
             transcription, cached_metadata = cached
             used_cached_transcript = True
             cached_episode = (cached_metadata or {}).get("episode") or {}
@@ -3031,7 +4582,9 @@ def main() -> None:
             )
             if os.environ.get("DIARIZATION", "0") == "1" and not has_speaker_labels:
                 log("复用转录文本，仅下载音频执行说话人识别")
-                if download_audio(info["audio_url"], audio_path):
+                if tracker:
+                    tracker.phase("downloading_audio", "为缓存转录补充说话人标签")
+                if info.get("audio_url") and download_audio(str(info["audio_url"]), audio_path):
                     audio_created_this_run = True
                     diarization_path = audio_path
                     if preprocess_audio(audio_path, wav_path):
@@ -3044,7 +4597,14 @@ def main() -> None:
                     }
                     warn("音频下载失败，无法为缓存转录添加说话人标签")
         else:
-            if not download_audio(info["audio_url"], audio_path):
+            if not info.get("audio_url"):
+                error("既没有可用的发布方转录，也未能提取音频地址")
+                print("\n调试信息 - 网页片段:")
+                print((info.get("html_sample") or "N/A")[:500])
+                sys.exit(1)
+            if tracker:
+                tracker.phase("downloading_audio")
+            if not download_audio(str(info["audio_url"]), audio_path):
                 title = info.get("title")
                 if title and title != "Unknown" and info.get("source") != "itunes_episode_search":
                     log(f"音频下载失败，尝试使用标题搜索替代音频源: {title}")
@@ -3054,7 +4614,7 @@ def main() -> None:
                         log(f"成功找到替代音频地址: {fallback_audio_url}")
                         info["audio_url"] = fallback_audio_url
                         audio_path.unlink(missing_ok=True)
-                        if not download_audio(info["audio_url"], audio_path):
+                        if not download_audio(str(info["audio_url"]), audio_path):
                             sys.exit(1)
                     else:
                         sys.exit(1)
@@ -3078,6 +4638,8 @@ def main() -> None:
                 log(f"Whisper initial_prompt: {initial_prompt}")
             else:
                 log(f"initial_prompt（备用 Whisper 时使用）: {initial_prompt}")
+            if tracker:
+                tracker.phase("transcribing", f"engine={asr_engine}, model={model}")
             transcription = transcribe_with_fallback(
                 transcribe_path,
                 model,
@@ -3089,10 +4651,13 @@ def main() -> None:
                 sys.exit(1)
             diarize_if_configured(transcribe_path, transcription)
 
+        if tracker:
+            tracker.phase("writing_outputs")
         transcript = transcription["text"]
         write_transcript_segments(
             segments_path,
             srt_path,
+            vtt_path,
             list(transcription.get("segments") or []),
         )
         transcript_document = render_transcript_document(
@@ -3101,9 +4666,10 @@ def main() -> None:
             transcript_path,
             segments_path,
             srt_path,
+            vtt_path,
             metadata_path,
         )
-        transcript_path.write_text(transcript_document, encoding="utf-8")
+        atomic_write_text(transcript_path, transcript_document)
         write_metadata(
             metadata_path,
             info,
@@ -3111,6 +4677,7 @@ def main() -> None:
             transcript_path,
             segments_path,
             srt_path,
+            vtt_path,
         )
 
         chunk_script = Path(__file__).with_name("chunk_transcript.py")
@@ -3119,34 +4686,52 @@ def main() -> None:
             transcript_path=transcript_path,
             segments_path=segments_path,
             srt_path=srt_path,
+            vtt_path=vtt_path,
             metadata_path=metadata_path,
             chunk_command=chunk_command,
             info=info,
             transcript_chars=len(transcript),
             output_dir=output_dir,
             combined_name=combined_name,
+            job_id=tracker.job_id if tracker else None,
+            job_status_path=tracker.status_path if tracker else None,
+            job_result_path=tracker.result_path if tracker else None,
         )
-        instruction_path.write_text(instruction, encoding="utf-8")
+        atomic_write_text(instruction_path, instruction)
 
         result_payload = {
             "mode": "transcribe",
             "reused_transcript": used_cached_transcript,
+            "transcription_source": transcription.get("source") or "asr",
             "transcript_path": str(transcript_path),
             "segments_path": str(segments_path),
             "srt_path": str(srt_path),
+            "vtt_path": str(vtt_path),
             "metadata_path": str(metadata_path),
             "instruction_path": str(instruction_path),
             "report_path": str(summary_dir / f"{combined_name}_详细总结.md"),
             "shownotes_archive": shownotes_archive,
+            "chapters_archive": chapters_archive,
+            "chapters_path": (
+                chapters_archive.get("path")
+                if chapters_archive and chapters_archive.get("ok")
+                else None
+            ),
         }
+        if tracker:
+            result_payload = tracker.finish(result_payload, awaiting_report=True)
         emit_result(result_payload)
 
-        log("✅ 转录阶段完成")
-        if not used_cached_transcript:
+        log("转录阶段完成；正式总结尚待 Agent 写入")
+        if tracker:
+            log(f"   作业状态: awaiting_report ({tracker.status_path})")
+            log(f"   作业结果: {tracker.result_path}")
+        if audio_path.exists():
             log(f"   音频文件: {audio_path}")
         log(f"   转录稿: {transcript_path}")
         log(f"   时间戳: {segments_path}")
         log(f"   SRT: {srt_path}")
+        log(f"   WebVTT: {vtt_path}")
         log(f"   元数据: {metadata_path}")
         log(f"   Agent任务指令: {instruction_path}")
         log(f"   转录引擎: {transcription['model']}")
@@ -3167,5 +4752,23 @@ def main() -> None:
                     log(f"保留 WAV 文件: {wav_path}")
 
 
+def cli_entrypoint() -> None:
+    try:
+        main()
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else 1
+        if ACTIVE_JOB and code and ACTIVE_JOB.state.get("status") == "running":
+            ACTIVE_JOB.fail(f"process exited with status {code}")
+        raise
+    except KeyboardInterrupt:
+        if ACTIVE_JOB and ACTIVE_JOB.state.get("status") == "running":
+            ACTIVE_JOB.fail("interrupted by user")
+        raise
+    except Exception as exc:
+        if ACTIVE_JOB and ACTIVE_JOB.state.get("status") == "running":
+            ACTIVE_JOB.fail(f"{type(exc).__name__}: {exc}")
+        raise
+
+
 if __name__ == "__main__":
-    main()
+    cli_entrypoint()

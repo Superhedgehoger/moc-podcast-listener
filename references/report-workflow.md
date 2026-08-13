@@ -77,16 +77,23 @@ Insert the archived Show Notes Markdown verbatim.
 ## 转录稿
 
 Briefly describe the transcript format and known ASR limitations. Link to the
-independent transcript, timestamp segments, and SRT using paths relative to the
-report file. Do not copy the full transcript into the report.
+independent transcript, timestamp segments, SRT, WebVTT, and Podcasting 2.0
+chapters when available, using paths relative to the report file. Do not copy
+the full transcript into the report. When metadata says the source is
+`publisher_transcript`, describe it as publisher-provided rather than ASR.
 
 Example:
 
 - [独立转录稿](<../转录稿/{节目名称}_{播客标题}_{发布日期}_转录稿.txt>)
 - [时间戳分段](<../转录稿/{节目名称}_{播客标题}_{发布日期}_segments.json>)
 - [SRT 字幕](<../转录稿/{节目名称}_{播客标题}_{发布日期}.srt>)
+- [WebVTT 字幕](<../转录稿/{节目名称}_{播客标题}_{发布日期}.vtt>)
+- [章节数据](<../转录稿/{节目名称}_{播客标题}_{发布日期}_chapters.json>)（存在时）
 ```
 
 Before finalizing, verify all quotations, preserve image-relative paths, list
 failed media downloads from the manifest, and confirm every transcript link
-resolves from the report directory.
+resolves from the report directory. Then run the exact `--verify JOB_ID
+--require-report` command from `_Agent任务指令.txt`. Do not report the podcast
+task as complete until `.jobs/<job-id>/status.json` says `completed`; a status
+of `awaiting_report` means only the transcription phase is complete.

@@ -167,9 +167,11 @@ class DiarizationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             segments_path = Path(tmp) / "segments.json"
             srt_path = Path(tmp) / "episode.srt"
+            vtt_path = Path(tmp) / "episode.vtt"
             PODCAST.write_transcript_segments(
                 segments_path,
                 srt_path,
+                vtt_path,
                 [
                     {
                         "start": 1.0,
@@ -181,9 +183,11 @@ class DiarizationTests(unittest.TestCase):
             )
             data = json.loads(segments_path.read_text(encoding="utf-8"))
             srt = srt_path.read_text(encoding="utf-8")
+            vtt = vtt_path.read_text(encoding="utf-8")
         self.assertEqual(data[0]["text"], "原始文本")
         self.assertEqual(data[0]["speaker"], "SPEAKER_00")
         self.assertIn("[SPEAKER_00] 原始文本", srt)
+        self.assertIn("<v SPEAKER_00>原始文本", vtt)
 
 
 if __name__ == "__main__":

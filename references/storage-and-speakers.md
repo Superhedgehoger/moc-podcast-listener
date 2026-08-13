@@ -8,6 +8,8 @@
 4. **Online-only mode** has zero storage cost but is not archival: publishers can move or remove images and links.
 
 The original source URL is always retained in the Show Notes and media manifest. In `hybrid` mode, failed image downloads fall back to their source URLs.
+Manifest schema v2 records each image's source URL, final URL, HTTP status,
+fetch time, MIME type, byte size, local path, and failure reason when relevant.
 
 ## Local Sync Folder
 
@@ -65,6 +67,36 @@ python3 podcast-listener.py --archive-only "EPISODE_URL"
 When `SHOWNOTES_PUBLIC_BASE_URL` is present, the script creates a sibling `_published.md` whose locally downloaded image references use public URLs. The original local Markdown remains unchanged.
 
 Set `SHOWNOTES_SYNC_REQUIRED=1` or pass `--sync-required` when an automation should fail if storage sync fails. The default keeps the local archive usable and reports the sync failure in JSON.
+
+## Optional Link Snapshots
+
+Show Notes hyperlinks remain online URLs by default. This is the lowest-cost
+choice and avoids unexpectedly archiving entire websites. When a linked page
+is important enough to preserve, install one of these tools and opt in:
+
+```bash
+# One self-contained HTML file per first-level link
+python3 podcast-listener.py --archive-only \
+  --link-snapshot singlefile "EPISODE_URL"
+
+# ArchiveBox collection; default add mode archives only the supplied URL
+python3 podcast-listener.py --archive-only \
+  --link-snapshot archivebox "EPISODE_URL"
+```
+
+The default limit is 10 links per episode. Override it with
+`SHOWNOTES_MAX_LINK_SNAPSHOTS`. Snapshot failures do not discard the original
+URL and do not fail the podcast job. The manifest records success, output path,
+capture time, or failure reason for every attempted link.
+
+Enable snapshots only for links you trust. SingleFile and ArchiveBox run as
+external browsers/archivers and may fetch redirects or embedded resources
+beyond the built-in downloader's network checks.
+
+Recommended cost policy: use `hybrid` for images, leave link snapshots at
+`none`, and selectively rerun valuable episodes with `singlefile`. Sync the
+resulting Markdown and sibling asset folders through a local Nutstore,
+OneDrive, iCloud Drive, Dropbox, or Syncthing directory.
 
 ## Speaker Diarization
 

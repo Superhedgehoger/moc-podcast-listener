@@ -115,9 +115,20 @@ read_result() {
 LATEST_INSTRUCTION="$(read_result instruction_path)"
 LATEST_TRANSCRIPT="$(read_result transcript_path)"
 LATEST_METADATA="$(read_result metadata_path)"
+LATEST_JOB_ID="$(read_result job_id)"
+LATEST_JOB_STATUS="$(read_result job_status)"
+LATEST_STATUS_PATH="$(read_result status_path)"
+LATEST_RESULT_PATH="$(read_result result_path)"
 
 echo ""
 log "转录阶段完成"
+
+if [ -n "$LATEST_JOB_ID" ]; then
+    echo "   作业 ID: $LATEST_JOB_ID"
+    echo "   当前状态: ${LATEST_JOB_STATUS:-awaiting_report}"
+    echo "   状态文件: $LATEST_STATUS_PATH"
+    echo "   结果文件: $LATEST_RESULT_PATH"
+fi
 
 if [ -n "$LATEST_TRANSCRIPT" ] && [ -f "$LATEST_TRANSCRIPT" ]; then
     CHAR_COUNT=$(wc -m < "$LATEST_TRANSCRIPT" 2>/dev/null || echo "0")
@@ -141,5 +152,5 @@ else
 fi
 
 log "=================================="
-log "脚本结束：总结步骤由 Agent 继续完成"
+log "脚本结束：作业仍需由 Agent 生成总结并执行产物核验"
 log "=================================="

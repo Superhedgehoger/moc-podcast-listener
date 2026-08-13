@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import subprocess
 import sys
@@ -39,6 +40,11 @@ class PlatformParsingTests(unittest.TestCase):
             "model": "small",
             "keep_audio": False,
             "shownotes_assets": "online",
+            "link_snapshot": "none",
+            "resume": None,
+            "job_id": None,
+            "verify": None,
+            "require_report": False,
         }
         values.update(overrides)
         return types.SimpleNamespace(**values)
@@ -46,6 +52,19 @@ class PlatformParsingTests(unittest.TestCase):
     def test_extract_show_notes_preserves_rich_html(self) -> None:
         rich = '<p>正文 <a href="https://example.com/article">链接</a><img src="https://example.com/a.png"></p>'
         self.assertEqual(MODULE.extract_show_notes("", {"description": rich}), rich)
+
+    def test_xiaoyuzhou_real_shape_prefers_rich_shownotes(self) -> None:
+        with patch.object(
+            MODULE, "fetch_text", return_value=fixture("xiaoyuzhou_episode.html")
+        ):
+            info = MODULE.get_episode_info("6a659e146356eb2d9be87c49")
+        self.assertEqual(info["show_title"], "无聊斋")
+        self.assertEqual(info["pub_date"], "20260726")
+        self.assertAlmostEqual(info["duration_minutes"], 5402 / 60)
+        self.assertEqual(info["show_notes"].count("<img"), 4)
+        self.assertEqual(info["guests"], ["刘旸教主", "孟阳", "月明", "阿铖"])
+        self.assertNotIn("SHARE", info["guests"])
+        self.assertNotIn("听众昵称", info["guests"])
 
     def test_shownotes_parser_supports_picture_and_lazy_images(self) -> None:
         seen = []
@@ -79,6 +98,37 @@ class PlatformParsingTests(unittest.TestCase):
         safe, reason = MODULE.is_safe_remote_url("http://127.0.0.1/private.png")
         self.assertFalse(safe)
         self.assertIn("blocked", reason)
+        safe, reason = MODULE.is_safe_remote_url("http://198.18.0.162/private.png")
+        self.assertFalse(safe)
+        self.assertIn("blocked", reason)
+
+    def test_proxy_fake_ip_is_allowed_only_for_domain_resolution(self) -> None:
+        fake_result = [
+            (MODULE.socket.AF_INET, MODULE.socket.SOCK_STREAM, 6, "", ("198.18.0.162", 443))
+        ]
+        with patch.object(MODULE.socket, "getaddrinfo", return_value=fake_result), patch.dict(
+            MODULE.os.environ, {"ALLOW_PROXY_FAKE_IP": "1"}
+        ):
+            safe, reason = MODULE.is_safe_remote_url("https://www.example.com/page")
+        self.assertTrue(safe)
+        self.assertIsNone(reason)
+
+    def test_safe_http_revalidates_redirect_targets(self) -> None:
+        redirect = MODULE.HTTPError(
+            "https://example.com/start",
+            302,
+            "Found",
+            {"Location": "http://127.0.0.1/private"},
+            io.BytesIO(),
+        )
+        opener = types.SimpleNamespace(open=lambda *args, **kwargs: (_ for _ in ()).throw(redirect))
+        with patch.object(MODULE, "build_opener", return_value=opener), patch.object(
+            MODULE,
+            "is_safe_remote_url",
+            side_effect=[(True, None), (False, "non-public address blocked")],
+        ):
+            with self.assertRaisesRegex(ValueError, "non-public"):
+                MODULE.open_safe_http("https://example.com/start")
 
     def test_shownotes_manifest_collects_plain_and_markdown_links(self) -> None:
         info = {
@@ -95,6 +145,25 @@ class PlatformParsingTests(unittest.TestCase):
         urls = {item["url"] for item in manifest["links"]}
         self.assertIn("https://example.com/site", urls)
         self.assertIn("https://example.com/article", urls)
+
+    def test_online_image_manifest_keeps_auditable_source_metadata(self) -> None:
+        info = {
+            "url": "https://episode.example/item",
+            "title": "Episode",
+            "show_title": "Show",
+            "show_notes": '<img src="https://cdn.example/image.png" alt="图">',
+        }
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            MODULE.os.environ,
+            {"SHOWNOTES_ASSETS": "online", "SHOWNOTES_LINK_SNAPSHOT": "none"},
+        ):
+            archived = MODULE.archive_show_notes(info, Path(tmp), "fixture")
+            manifest = json.loads(Path(archived["manifest_path"]).read_text(encoding="utf-8"))
+        image = manifest["images"][0]
+        self.assertEqual(manifest["schema_version"], 2)
+        self.assertEqual(image["status"], "online_only")
+        self.assertEqual(image["source_url"], "https://cdn.example/image.png")
+        self.assertEqual(image["final_url"], image["source_url"])
 
     def test_shownotes_archive_reuses_manifest_image(self) -> None:
         info = {
@@ -139,15 +208,20 @@ class PlatformParsingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             segments_path = Path(tmp) / "segments.json"
             srt_path = Path(tmp) / "episode.srt"
+            vtt_path = Path(tmp) / "episode.vtt"
             MODULE.write_transcript_segments(
                 segments_path,
                 srt_path,
+                vtt_path,
                 [{"start": 1.25, "end": 3.5, "text": "测试文本"}],
             )
             segments = json.loads(segments_path.read_text(encoding="utf-8"))
             srt = srt_path.read_text(encoding="utf-8")
+            vtt = vtt_path.read_text(encoding="utf-8")
         self.assertEqual(segments[0]["text"], "测试文本")
         self.assertIn("00:00:01,250 --> 00:00:03,500", srt)
+        self.assertTrue(vtt.startswith("WEBVTT"))
+        self.assertIn("00:00:01.250 --> 00:00:03.500", vtt)
 
     def test_render_transcript_document_has_header_timestamps_and_footer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -157,6 +231,7 @@ class PlatformParsingTests(unittest.TestCase):
             transcript_path = transcript_dir / "episode_转录稿.txt"
             segments_path = transcript_dir / "episode_segments.json"
             srt_path = transcript_dir / "episode.srt"
+            vtt_path = transcript_dir / "episode.vtt"
             metadata_path = output / "episode_metadata.json"
             document = MODULE.render_transcript_document(
                 {
@@ -175,6 +250,7 @@ class PlatformParsingTests(unittest.TestCase):
                 transcript_path,
                 segments_path,
                 srt_path,
+                vtt_path,
                 metadata_path,
             )
         self.assertIn("# 播客转录稿", document)
@@ -424,6 +500,93 @@ class PlatformParsingTests(unittest.TestCase):
             self.assertIsNone(MODULE.select_rss_episode("https://example.com/feed.xml", episode_title="Missing"))
             info = MODULE.select_rss_episode("https://example.com/feed.xml", episode_title="Fixture Episode Two")
         self.assertEqual(info["id"], "fixture-2")
+
+    def test_podcasting2_metadata_is_preserved_and_urls_are_resolved(self) -> None:
+        with patch.object(MODULE, "fetch_text", return_value=fixture("podcasting2.xml")):
+            info = MODULE.select_rss_episode("https://feeds.example.com/show/feed.xml")
+        self.assertEqual(info["guests"], ["主持人甲", "嘉宾乙"])
+        self.assertEqual(info["people"][1]["role"], "guest")
+        self.assertEqual(info["language"], "zh-CN")
+        self.assertAlmostEqual(info["duration_minutes"], 90 + 2 / 60)
+        self.assertEqual(
+            info["transcripts"][0]["url"],
+            "https://feeds.example.com/show/transcript.vtt",
+        )
+        self.assertEqual(
+            info["chapters"]["url"],
+            "https://feeds.example.com/show/chapters.json",
+        )
+        self.assertEqual(info["cover_url"], "https://cdn.example.com/episode-square.jpg")
+
+    def test_publisher_vtt_is_preferred_and_parsed_with_speakers(self) -> None:
+        info = {
+            "language": "zh-CN",
+            "transcripts": [
+                {
+                    "url": "https://cdn.example.com/transcript.txt",
+                    "type": "text/plain",
+                    "language": "zh-CN",
+                },
+                {
+                    "url": "https://cdn.example.com/transcript.vtt",
+                    "type": "text/vtt",
+                    "language": "zh-CN",
+                    "rel": "captions",
+                },
+            ],
+        }
+
+        def fake_download(url, output_path, **kwargs):
+            self.assertTrue(url.endswith("transcript.vtt"))
+            output_path.write_text(fixture("publisher_transcript.vtt"), encoding="utf-8")
+            return {
+                "ok": True,
+                "source_url": url,
+                "final_url": url,
+                "http_status": 200,
+                "fetched_at": "2026-08-13T00:00:00Z",
+                "content_type": "text/vtt",
+                "bytes": output_path.stat().st_size,
+                "path": str(output_path),
+            }
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            MODULE, "download_http_resource", side_effect=fake_download
+        ):
+            transcription = MODULE.load_publisher_transcript(
+                info, Path(tmp), "fixture"
+            )
+        self.assertEqual(transcription["source"], "publisher_transcript")
+        self.assertEqual(len(transcription["segments"]), 2)
+        self.assertEqual(transcription["segments"][0]["speaker"], "主持人甲")
+        self.assertIn("长期归档", transcription["text"])
+
+    def test_partial_publisher_transcript_is_rejected_for_long_episode(self) -> None:
+        info = {
+            "duration_minutes": 90,
+            "transcripts": [
+                {"url": "https://cdn.example.com/transcript.txt", "type": "text/plain"}
+            ],
+        }
+
+        def fake_download(url, output_path, **kwargs):
+            output_path.write_text("这只是很短的一小段发布方转录内容，不能代表完整节目。", encoding="utf-8")
+            return {
+                "ok": True,
+                "source_url": url,
+                "final_url": url,
+                "http_status": 200,
+                "fetched_at": "2026-08-13T00:00:00Z",
+                "content_type": "text/plain",
+                "bytes": output_path.stat().st_size,
+                "path": str(output_path),
+            }
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            MODULE, "download_http_resource", side_effect=fake_download
+        ):
+            transcription = MODULE.load_publisher_transcript(info, Path(tmp), "fixture")
+        self.assertIsNone(transcription)
 
     def test_youtube_yt_dlp_result(self) -> None:
         completed = subprocess.CompletedProcess(

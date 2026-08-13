@@ -1,5 +1,27 @@
 # 更新日志 (Changelog)
 
+## v4.7 (2026-08-13)
+- 新增 WebVTT 字幕输出，并保留匿名或发布方说话人标签
+- 支持下载、校验和标准化 Podcasting 2.0 章节 JSON
+- Show Notes manifest 升级为 schema v2，记录最终 URL、HTTP 状态、抓取时间、MIME、字节数与失败原因
+- 新增默认关闭的 `singlefile` / `archivebox` 一级外链快照，支持数量上限且始终保留在线 URL
+- 总结稿工作流和产物核验覆盖 VTT、章节及链接快照
+
+## v4.6 (2026-08-13)
+- 每次处理创建 `.jobs/<job-id>/job.json`、`status.json` 和 `result.json`
+- 新增阶段进度、检查点和 `--resume JOB_ID|latest`，避免中断后重复解析或归档
+- 明确区分 `awaiting_report` 与 `completed`，不再把“转录完成”误报为“整集完成”
+- 新增 `--verify JOB_ID_OR_RESULT --require-report`，核验转录、字幕、元数据、Show Notes、总结稿及相对链接
+- 状态与结果文件使用原子写入，失败任务会记录原因
+
+## v4.5 (2026-08-13)
+- 所有内置 HTTP 下载统一校验 URL 与每次重定向，阻止本地/私网目标并限制响应体大小
+- 兼容 Clash/Surge 类透明代理的域名 Fake-IP，同时继续拒绝非公网 IP 直连
+- RSS 新增 Podcasting 2.0 transcript、chapters、person、image 和 language 元数据解析
+- 优先使用发布方 VTT/SRT/JSON/文本转录，不可用时才回退缓存或本地 ASR
+- 修复小宇宙当前页面结构解析，准确提取节目名、时长、日期、富文本 Show Notes、图片和嘉宾候选
+- 新增目标小宇宙页面、Podcasting 2.0 feed 与发布方 WebVTT 的离线回归 fixture
+
 ## v4.4 (2026-08-05)
 - 转录稿新增节目、单集、原始链接、发布日期、时长、引擎、语言和生成时间头部
 - 转录正文按 `[HH:MM:SS - HH:MM:SS]` 展示分段时间戳，并保留可选匿名说话人标签

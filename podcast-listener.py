@@ -59,7 +59,10 @@ IMAGE_CONTENT_TYPE_EXTENSIONS = {
 HTTP_REDIRECT_CODES = {301, 302, 303, 307, 308}
 MAX_HTTP_REDIRECTS = 8
 MAX_TEXT_RESPONSE_BYTES = 20 * 1024 * 1024
-PROXY_FAKE_IP_NETWORK = ipaddress.ip_network("198.18.0.0/15")
+PROXY_FAKE_IP_NETWORKS = (
+    ipaddress.ip_network("198.18.0.0/15"),
+    ipaddress.ip_network("fdfe:dcba:9876::/48"),
+)
 
 
 def log(msg: str) -> None:
@@ -130,7 +133,7 @@ def is_safe_remote_url(url: str) -> tuple[bool, str | None]:
             return False, f"invalid resolved address: {address}"
         fake_ip_allowed = (
             literal_ip is None
-            and ip in PROXY_FAKE_IP_NETWORK
+            and any(ip in network for network in PROXY_FAKE_IP_NETWORKS)
             and os.environ.get("ALLOW_PROXY_FAKE_IP", "1") != "0"
         )
         if not ip.is_global and not fake_ip_allowed:
@@ -1250,7 +1253,8 @@ def snapshot_shownotes_links(
 
 def archive_show_notes(info: dict[str, Any], output_dir: Path, combined_name: str) -> dict[str, Any] | None:
     raw_show_notes = info.get("show_notes") or ""
-    if not raw_show_notes.strip():
+    cover_url = normalize_shownotes_url(info.get("cover_url"), info.get("url") or "")
+    if not raw_show_notes.strip() and not cover_url:
         return None
 
     mode = os.environ.get("SHOWNOTES_ASSETS", "hybrid").lower().strip()
@@ -1295,8 +1299,8 @@ def archive_show_notes(info: dict[str, Any], output_dir: Path, combined_name: st
         int(os.environ.get("SHOWNOTES_MAX_IMAGE_BYTES", str(SHOWNOTES_DEFAULT_MAX_IMAGE_BYTES))),
     )
 
-    def resolve_image(src: str, alt: str) -> str:
-        image_entry: dict[str, Any] = {"source_url": src, "alt": alt}
+    def resolve_image(src: str, alt: str, role: str = "shownotes_image") -> str:
+        image_entry: dict[str, Any] = {"source_url": src, "alt": alt, "role": role}
         if src in seen_images:
             image_entry.update(
                 {
@@ -1379,11 +1383,24 @@ def archive_show_notes(info: dict[str, Any], output_dir: Path, combined_name: st
         images.append(image_entry)
         return markdown_url
 
+    cover_markdown_url = None
+    if cover_url:
+        cover_alt = clean_text(f"{info.get('show_title') or info.get('title') or '播客'} 封面")
+        cover_markdown_url = resolve_image(cover_url, cover_alt, "cover")
+
     parser = ShowNotesMarkdownParser(info.get("url") or "", resolve_image)
     parser.feed(raw_show_notes)
     parser.close()
 
-    markdown = parser.markdown() or clean_text(raw_show_notes)
+    markdown_parts = []
+    if cover_markdown_url:
+        markdown_parts.append(f"![{cover_alt}]({markdown_escape_url(cover_markdown_url)})")
+    body_markdown = parser.markdown() or clean_text(raw_show_notes)
+    if body_markdown:
+        markdown_parts.append(body_markdown)
+    else:
+        markdown_parts.append("> 本集未提供 Show Notes 正文。")
+    markdown = "\n\n".join(markdown_parts)
     source_url = info.get("url") or ""
     if source_url:
         markdown = f"[原始单集链接]({markdown_escape_url(source_url)})\n\n{markdown}".strip()
@@ -1420,6 +1437,7 @@ def archive_show_notes(info: dict[str, Any], output_dir: Path, combined_name: st
         "raw_html_path": str(html_path),
         "markdown_path": str(markdown_path),
         "assets_dir": str(assets_dir) if mode in {"local", "hybrid"} else None,
+        "cover_url": cover_url or None,
         "images": images,
         "links": links,
         "link_snapshots": snapshot_summary,
@@ -1693,7 +1711,7 @@ def get_overcast_episode_info(url: str) -> dict[str, Any] | None:
     feed_url = find_rss_feed_url(page_html, data)
 
     if audio_url:
-        return {
+        page_info = {
             "id": safe_filename(title, "overcast"),
             "title": title,
             "url": url,
@@ -1706,6 +1724,25 @@ def get_overcast_episode_info(url: str) -> dict[str, Any] | None:
             "pub_date": time.strftime("%Y%m%d"),
             "source": "overcast",
         }
+        fallback_info = None
+        fallback_source = None
+        if feed_url:
+            fallback_info = select_rss_episode(feed_url, episode_title=title, source_url=url)
+            fallback_source = "overcast_rss"
+        if not fallback_info and not show_notes and normalize_match_text(title) not in {"", "overcast"}:
+            warn("Overcast 页面没有 Show Notes，尝试通过播客目录补全")
+            fallback_info = search_episode_info(title)
+            fallback_source = "overcast_catalog"
+        if fallback_info:
+            merged = dict(fallback_info)
+            merged["url"] = url
+            merged["audio_url"] = audio_url or merged.get("audio_url")
+            merged["cover_url"] = merged.get("cover_url") or page_info.get("cover_url") or ""
+            merged["show_notes"] = show_notes or merged.get("show_notes") or ""
+            merged["guests"] = page_info.get("guests") or merged.get("guests") or []
+            merged["source"] = fallback_source
+            return merged
+        return page_info
 
     if feed_url:
         info = select_rss_episode(feed_url, episode_title=title, source_url=url)
@@ -3963,11 +4000,23 @@ class JobTracker:
 ACTIVE_JOB: JobTracker | None = None
 
 
-def archive_checkpoint_is_usable(archive: Any) -> bool:
+def archive_checkpoint_is_usable(archive: Any, cover_url: str | None = None) -> bool:
     if not isinstance(archive, dict):
         return False
     required = ("raw_html_path", "markdown_path", "manifest_path")
-    return all(archive.get(key) and Path(archive[key]).is_file() for key in required)
+    if not all(archive.get(key) and Path(archive[key]).is_file() for key in required):
+        return False
+    if not cover_url:
+        return True
+    try:
+        manifest = read_json_object(Path(str(archive["manifest_path"])))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return False
+    normalized_cover = normalize_shownotes_url(cover_url)
+    return any(
+        image.get("role") == "cover" and image.get("source_url") == normalized_cover
+        for image in manifest.get("images") or []
+    )
 
 
 def resolve_verify_target(output_dir: Path, target: str) -> tuple[Path, Path | None]:
@@ -4022,9 +4071,10 @@ def verify_result_artifacts(
         if vtt_path and not vtt_path.read_text(encoding="utf-8").startswith("WEBVTT"):
             errors.append(f"WebVTT header is missing: {vtt_path}")
 
+    metadata_payload: dict[str, Any] = {}
     if metadata_path:
         try:
-            read_json_object(metadata_path)
+            metadata_payload = read_json_object(metadata_path)
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             errors.append(f"metadata JSON is invalid: {metadata_path}: {exc}")
 
@@ -4036,6 +4086,14 @@ def verify_result_artifacts(
         if manifest_path:
             try:
                 manifest = read_json_object(manifest_path)
+                expected_cover = normalize_shownotes_url(
+                    (metadata_payload.get("episode") or {}).get("cover_url")
+                )
+                if expected_cover and not any(
+                    image.get("role") == "cover" and image.get("source_url") == expected_cover
+                    for image in manifest.get("images") or []
+                ):
+                    errors.append(f"Show Notes manifest is missing episode cover: {expected_cover}")
                 for image in manifest.get("images") or []:
                     if image.get("ok") and image.get("path"):
                         image_path = Path(str(image["path"])).expanduser()
@@ -4504,7 +4562,7 @@ def main() -> None:
         if tracker
         else None
     )
-    if archive_checkpoint_is_usable(archive_checkpoint):
+    if archive_checkpoint_is_usable(archive_checkpoint, info.get("cover_url")):
         shownotes_archive = dict(archive_checkpoint)
         log("复用作业检查点中的 Show Notes 归档")
     else:
@@ -4524,7 +4582,7 @@ def main() -> None:
                 log(
                     f"   Show Notes 已同步: {sync_result['backend']}，{sync_result['file_count']} 个文件"
                 )
-    if tracker and not archive_checkpoint_is_usable(archive_checkpoint):
+    if tracker and not archive_checkpoint_is_usable(archive_checkpoint, info.get("cover_url")):
         tracker.checkpoint("shownotes_archive", shownotes_archive)
 
     chapter_checkpoint = (

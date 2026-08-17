@@ -2,7 +2,7 @@
 
 **简体中文** | [English](README.en.md) | [多语言首页](README.md)
 
-> 版本：v4.7.0
+> 版本：v4.7.1
 > 核心流程：输入单集 → 安全解析 → 发布方转录或本地 ASR → Show Notes/章节归档 → Agent 总结 → 产物核验
 
 很多播客值得反复查阅，但音频不方便搜索，Show Notes 中的图片和链接也可能失效。
@@ -149,7 +149,7 @@ ffmpeg 转换为单声道 WAV；VAD 需要时内部生成 16kHz 临时副本
   ↓
 SenseVoice-Small 转录（默认，模型单例缓存）→ faster-whisper/openai-whisper 备用
   ↓
-Show Notes 转 Markdown，图片下载到同级「图片」目录，链接保留原 URL
+Show Notes 转 Markdown；单集封面始终进入 manifest，封面和正文图片下载到同级「图片」目录，链接保留原 URL
   ↓
 保存转录稿、时间戳、SRT、WebVTT、章节、元数据、作业状态和 Agent 指令
 ```

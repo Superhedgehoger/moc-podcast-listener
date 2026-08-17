@@ -26,7 +26,7 @@ The scripts perform deterministic operations:
 3. Prefer a Podcasting 2.0 publisher transcript; otherwise download and preprocess audio.
 4. Transcribe locally with SenseVoice-Small or Whisper when needed.
 5. Write a self-contained transcript, segments JSON, SRT, and WebVTT.
-6. Archive chapters, Show Notes, links, images, and an auditable media manifest.
+6. Archive chapters, Show Notes, episode artwork, inline images, links, and an auditable media manifest.
 7. Persist resumable job state and produce an agent instruction for synthesis.
 8. Verify all artifacts after the agent writes the final report.
 

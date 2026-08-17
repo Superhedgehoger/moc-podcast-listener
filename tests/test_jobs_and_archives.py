@@ -134,6 +134,25 @@ class JobTrackerTests(unittest.TestCase):
 
 
 class ArchiveTests(unittest.TestCase):
+    def test_coverless_checkpoint_is_rebuilt_when_episode_has_cover(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw = root / "shownotes.raw.html"
+            markdown = root / "shownotes.md"
+            manifest = root / "media-manifest.json"
+            raw.write_text("", encoding="utf-8")
+            markdown.write_text("fixture", encoding="utf-8")
+            manifest.write_text('{"images": []}', encoding="utf-8")
+            archive = {
+                "raw_html_path": str(raw),
+                "markdown_path": str(markdown),
+                "manifest_path": str(manifest),
+            }
+            usable = PODCAST.archive_checkpoint_is_usable(
+                archive, "https://cdn.example/cover.jpg"
+            )
+        self.assertFalse(usable)
+
     def test_podcasting2_chapters_are_downloaded_and_normalized(self) -> None:
         payload = {
             "version": "1.2.0",

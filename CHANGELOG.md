@@ -1,5 +1,12 @@
 # 更新日志 (Changelog)
 
+## v4.7.1 (2026-08-17)
+- 单集封面现在作为 `cover` 资源写入 Show Notes manifest，并在 `hybrid` / `local` 模式下落盘
+- 即使发布方没有 Show Notes 正文，只要存在封面，也会生成可核验的 Markdown、manifest 和图片归档
+- Overcast 页面缺少 Show Notes 时通过页面 RSS 或播客目录补全节目名、发布日期和正文，同时保留页面直链音频
+- 恢复任务时拒绝复用缺少封面的旧 manifest；核验阶段检查封面资源是否进入 manifest
+- 兼容 Clash/Mihomo 默认的 IPv4 与 IPv6 Fake-IP 网段；例外仅用于域名解析结果
+
 ## v4.7.0 (2026-08-13)
 - 新增 WebVTT 字幕输出，并保留匿名或发布方说话人标签
 - 支持下载、校验和标准化 Podcasting 2.0 章节 JSON

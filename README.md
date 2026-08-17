@@ -31,7 +31,7 @@ MOC Podcast Listener 面向 Codex、OpenClaw 及其他支持 `SKILL.md` 的 Agen
 - RSS 提供 Podcasting 2.0 转录时优先采用发布方版本，避免重复 ASR。
 - 生成带节目名称、标题、原始链接、日期、引擎和时间戳的独立转录稿。
 - 同时输出 segments JSON、SRT 与 WebVTT，方便引用、检索和二次处理。
-- 将 Show Notes 转为 Markdown，保留在线链接并可下载图片。
+- 将 Show Notes 转为 Markdown，始终记录单集封面，并可下载正文图片。
 - 支持本地同步目录、坚果云 WebDAV、S3/R2。
 - 长音频会检查字数与时间戳覆盖，拒绝静默复用残缺转录。
 - 持久化作业状态，支持 `--resume`，并区分转录完成与总结完成。
@@ -52,7 +52,7 @@ the agent performs evidence-backed synthesis.
 - Prefers Podcasting 2.0 publisher transcripts when feeds provide them.
 - Produces a self-contained transcript with source metadata and timestamps.
 - Exports timestamp segments as JSON plus SRT and WebVTT subtitles.
-- Archives Show Notes as Markdown while preserving links and images.
+- Archives Show Notes as Markdown, always records episode artwork, and preserves inline images.
 - Supports local sync folders, Nutstore WebDAV, and S3/R2.
 - Rejects suspiciously short long-form transcripts and incomplete timestamp
   coverage.

@@ -103,15 +103,25 @@ class PlatformParsingTests(unittest.TestCase):
         self.assertIn("blocked", reason)
 
     def test_proxy_fake_ip_is_allowed_only_for_domain_resolution(self) -> None:
-        fake_result = [
-            (MODULE.socket.AF_INET, MODULE.socket.SOCK_STREAM, 6, "", ("198.18.0.162", 443))
+        fake_results = [
+            [(MODULE.socket.AF_INET, MODULE.socket.SOCK_STREAM, 6, "", ("198.18.0.162", 443))],
+            [
+                (
+                    MODULE.socket.AF_INET6,
+                    MODULE.socket.SOCK_STREAM,
+                    6,
+                    "",
+                    ("fdfe:dcba:9876::8d", 443, 0, 0),
+                )
+            ],
         ]
-        with patch.object(MODULE.socket, "getaddrinfo", return_value=fake_result), patch.dict(
-            MODULE.os.environ, {"ALLOW_PROXY_FAKE_IP": "1"}
-        ):
-            safe, reason = MODULE.is_safe_remote_url("https://www.example.com/page")
-        self.assertTrue(safe)
-        self.assertIsNone(reason)
+        for fake_result in fake_results:
+            with self.subTest(address=fake_result[0][4][0]), patch.object(
+                MODULE.socket, "getaddrinfo", return_value=fake_result
+            ), patch.dict(MODULE.os.environ, {"ALLOW_PROXY_FAKE_IP": "1"}):
+                safe, reason = MODULE.is_safe_remote_url("https://www.example.com/page")
+            self.assertTrue(safe)
+            self.assertIsNone(reason)
 
     def test_safe_http_revalidates_redirect_targets(self) -> None:
         redirect = MODULE.HTTPError(
@@ -164,6 +174,40 @@ class PlatformParsingTests(unittest.TestCase):
         self.assertEqual(image["status"], "online_only")
         self.assertEqual(image["source_url"], "https://cdn.example/image.png")
         self.assertEqual(image["final_url"], image["source_url"])
+
+    def test_cover_is_archived_without_shownotes_body(self) -> None:
+        info = {
+            "url": "https://episode.example/item",
+            "title": "Episode",
+            "show_title": "Show",
+            "show_notes": "",
+            "cover_url": "https://cdn.example/cover.jpg",
+        }
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            MODULE.os.environ, {"SHOWNOTES_ASSETS": "hybrid"}
+        ), patch.object(
+            MODULE,
+            "download_shownotes_image",
+            return_value={
+                "ok": True,
+                "path": str(Path(tmp) / "图片" / "fixture_assets" / "cover.jpg"),
+                "sha256": "cover-hash",
+                "final_url": info["cover_url"],
+                "content_type": "image/jpeg",
+                "bytes": 7,
+            },
+        ):
+            image_path = Path(tmp) / "图片" / "fixture_assets" / "cover.jpg"
+            image_path.parent.mkdir(parents=True)
+            image_path.write_bytes(b"fixture")
+            archived = MODULE.archive_show_notes(info, Path(tmp), "fixture")
+            manifest = json.loads(Path(archived["manifest_path"]).read_text(encoding="utf-8"))
+            markdown = Path(archived["markdown_path"]).read_text(encoding="utf-8")
+        self.assertEqual(archived["image_count"], 1)
+        self.assertEqual(manifest["images"][0]["role"], "cover")
+        self.assertEqual(manifest["cover_url"], info["cover_url"])
+        self.assertIn("Show 封面", markdown)
+        self.assertIn("未提供 Show Notes 正文", markdown)
 
     def test_shownotes_archive_reuses_manifest_image(self) -> None:
         info = {
@@ -481,9 +525,57 @@ class PlatformParsingTests(unittest.TestCase):
         self.assertEqual(info["audio_url"], "https://cdn.example.com/apple-fixture.mp3")
 
     def test_overcast_page(self) -> None:
-        with patch.object(MODULE, "fetch_text", return_value=fixture("overcast.html")):
+        with patch.object(MODULE, "fetch_text", return_value=fixture("overcast.html")), patch.object(
+            MODULE, "search_episode_info", return_value=None
+        ):
             info = MODULE.get_overcast_episode_info("https://overcast.fm/+fixture")
         self.assertEqual(info["source"], "overcast")
+        self.assertTrue(info["audio_url"].endswith("overcast-fixture.mp3"))
+
+    def test_overcast_page_merges_rss_when_available(self) -> None:
+        rss_info = {
+            "id": "rss-episode",
+            "title": "Overcast Fixture Episode",
+            "url": "https://feed.example/episode",
+            "audio_url": "https://cdn.example.com/rss.mp3",
+            "cover_url": "https://cdn.example.com/rss-cover.jpg",
+            "show_notes": "<p>RSS Show Notes</p>",
+            "guests": ["RSS Guest"],
+            "duration_minutes": 42.0,
+            "show_title": "Fixture Show",
+            "pub_date": "20260801",
+            "source": "rss",
+        }
+        with patch.object(MODULE, "fetch_text", return_value=fixture("overcast.html")), patch.object(
+            MODULE, "find_rss_feed_url", return_value="https://feed.example/rss.xml"
+        ), patch.object(MODULE, "select_rss_episode", return_value=rss_info):
+            info = MODULE.get_overcast_episode_info("https://overcast.fm/+fixture")
+        self.assertEqual(info["source"], "overcast_rss")
+        self.assertEqual(info["show_notes"], "<p>RSS Show Notes</p>")
+        self.assertEqual(info["pub_date"], "20260801")
+        self.assertTrue(info["audio_url"].endswith("overcast-fixture.mp3"))
+
+    def test_overcast_page_uses_catalog_when_shownotes_are_missing(self) -> None:
+        catalog_info = {
+            "id": "catalog-episode",
+            "title": "Overcast Fixture Episode",
+            "url": "https://catalog.example/episode",
+            "audio_url": "https://cdn.example.com/catalog.mp3",
+            "cover_url": "https://cdn.example.com/catalog-cover.jpg",
+            "show_notes": "<p>Catalog Show Notes</p>",
+            "guests": [],
+            "duration_minutes": 30.0,
+            "show_title": "Fixture Show",
+            "pub_date": "20260731",
+            "source": "itunes_rss",
+        }
+        with patch.object(MODULE, "fetch_text", return_value=fixture("overcast.html")), patch.object(
+            MODULE, "search_episode_info", return_value=catalog_info
+        ):
+            info = MODULE.get_overcast_episode_info("https://overcast.fm/+fixture")
+        self.assertEqual(info["source"], "overcast_catalog")
+        self.assertEqual(info["show_notes"], "<p>Catalog Show Notes</p>")
+        self.assertEqual(info["pub_date"], "20260731")
         self.assertTrue(info["audio_url"].endswith("overcast-fixture.mp3"))
 
     def test_filename_omits_overcast_and_infers_show_name(self) -> None:

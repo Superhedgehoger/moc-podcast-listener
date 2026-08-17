@@ -3381,6 +3381,61 @@ def safe_filename(title: str, fallback: str) -> str:
     return safe or fallback
 
 
+PLATFORM_FILENAME_LABELS = {
+    "apple podcasts",
+    "castbox",
+    "castro",
+    "iheartradio",
+    "listennotes",
+    "overcast",
+    "pocket casts",
+    "pocketcasts",
+    "podbean",
+    "podwise",
+    "spotify",
+    "xiaoyuzhou",
+    "小宇宙",
+}
+
+
+def filename_episode_parts(info: dict[str, Any]) -> tuple[str, str]:
+    """Return content names for filenames without a podcast platform label."""
+    raw_show = str(info.get("show_title") or "").strip()
+    raw_title = str(info.get("title") or "").strip()
+    normalized_show = normalize_match_text(raw_show)
+    platform_names = {
+        normalize_match_text(label) for label in PLATFORM_FILENAME_LABELS
+    }
+
+    raw_title = re.sub(
+        r"\s*(?:[-—–|]\s*)?小宇宙(?:\s*[-—–|]\s*听播客上小宇宙)?\s*$",
+        "",
+        raw_title,
+        flags=re.IGNORECASE,
+    ).strip()
+    if normalized_show in platform_names:
+        raw_show = ""
+        for separator in (" — ", " – ", " - "):
+            if separator not in raw_title:
+                continue
+            episode_candidate, show_candidate = raw_title.rsplit(separator, 1)
+            if episode_candidate.strip() and show_candidate.strip():
+                raw_title = episode_candidate.strip()
+                raw_show = show_candidate.strip()
+                break
+
+    platform_prefix = "|".join(
+        re.escape(label) for label in sorted(PLATFORM_FILENAME_LABELS, key=len, reverse=True)
+    )
+    raw_title = re.sub(
+        rf"^(?:{platform_prefix})[\s_：:\-—–|]+",
+        "",
+        raw_title,
+        flags=re.IGNORECASE,
+    ).strip()
+    return raw_show, raw_title
+
+
 def build_agent_instruction(
     transcript_path: Path,
     segments_path: Path,
@@ -4222,17 +4277,18 @@ def diarize_if_configured(
 
 
 def build_combined_name(info: dict[str, Any]) -> str:
-    show_name = safe_filename(info.get("show_title") or "未知节目", "未知节目")
-    episode_title = safe_filename(info.get("title") or "未知单集", "未知单集")
+    raw_show, raw_title = filename_episode_parts(info)
+    show_name = safe_filename(raw_show, "")
+    episode_title = safe_filename(raw_title or "未知单集", "未知单集")
     raw_pub_date = info.get("pub_date") or time.strftime("%Y%m%d")
     pub_date = re.sub(r"[^0-9]", "", str(raw_pub_date))[:8]
     if len(pub_date) < 8:
         pub_date = time.strftime("%Y%m%d")
 
-    combined = f"{show_name}_{episode_title}_{pub_date}"
+    combined = "_".join(part for part in (show_name, episode_title, pub_date) if part)
     while len(combined.encode("utf-8")) > 200 and len(episode_title) > 5:
         episode_title = episode_title[:-1]
-        combined = f"{show_name}_{episode_title}_{pub_date}"
+        combined = "_".join(part for part in (show_name, episode_title, pub_date) if part)
     return combined
 
 

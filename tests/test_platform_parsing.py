@@ -486,6 +486,28 @@ class PlatformParsingTests(unittest.TestCase):
         self.assertEqual(info["source"], "overcast")
         self.assertTrue(info["audio_url"].endswith("overcast-fixture.mp3"))
 
+    def test_filename_omits_overcast_and_infers_show_name(self) -> None:
+        name = MODULE.build_combined_name(
+            {
+                "show_title": "Overcast",
+                "title": "vol.597 生活小工具 — 无聊斋",
+                "pub_date": "20260814",
+                "source": "overcast",
+            }
+        )
+        self.assertEqual(name, "无聊斋_vol.597 生活小工具_20260814")
+
+    def test_filename_omits_xiaoyuzhou_page_chrome(self) -> None:
+        name = MODULE.build_combined_name(
+            {
+                "show_title": "小宇宙",
+                "title": "93 亲历 ICU - 螺旋下降 小宇宙 - 听播客上小宇宙",
+                "pub_date": "20250113",
+                "source": "xiaoyuzhou",
+            }
+        )
+        self.assertEqual(name, "螺旋下降_93 亲历 ICU_20250113")
+
     def test_spotify_search_fallback(self) -> None:
         resolved = {"title": "Spotify Fixture Episode", "audio_url": "https://cdn.example.com/spotify.mp3"}
         with patch.object(MODULE, "fetch_text", return_value=fixture("spotify.html")), patch.object(

@@ -63,6 +63,7 @@ Read [references/report-workflow.md](references/report-workflow.md) before produ
 - Attach timestamps to quotations whenever segment data is available.
 - Preserve the archived Show Notes Markdown verbatim in the final report so relative image paths remain valid.
 - Keep the transcript as a separate source document. In the report, describe it and link the transcript, segments JSON, SRT, WebVTT, and archived chapter JSON when present, using paths relative to the report; never embed the complete transcript.
+- Name artifacts from the podcast show, episode title, and publication date. Do not add distribution platform names such as Overcast or 小宇宙 to filenames.
 - Do not claim that a URL or image was archived unless its manifest entry reports success.
 
 ## Verify

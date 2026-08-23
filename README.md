@@ -2,11 +2,11 @@
 
 [简体中文](README.zh-CN.md) | [English](README.en.md)
 
-A local-first podcast workflow for episode resolution, audio transcription,
-timestamped transcripts, and durable Show Notes archiving.
+A local-first podcast and course workflow for media resolution, audio-only
+transcription, timestamped transcripts, and durable source archiving.
 
-一个本地优先的播客处理 Skill：解析单集、转录音频、生成时间戳转录稿，并完整归档
-Show Notes 的文字、链接与图片。
+一个本地优先的播客与课程处理 Skill：解析单集或课时，只获取音轨进行转录，生成时间戳
+转录稿，并完整归档 Show Notes 的文字、链接与图片。
 
 Give it an episode link and it turns a piece of audio into a reusable research
 package: a source-linked transcript, timestamp data, subtitles, archived Show
@@ -26,6 +26,8 @@ MOC Podcast Listener 面向 Codex、OpenClaw 及其他支持 `SKILL.md` 的 Agen
 
 - 支持小宇宙、Apple Podcasts、Spotify、Overcast、YouTube、Bilibili、
   网易云音乐、喜马拉雅、荔枝 FM、RSS 等来源。
+- YouTube/Bilibili 只选择音频流；本地课程视频只抽取音轨，不保留视频副本。
+- 支持本地常见音频与视频课程文件，按课时生成独立转录和总结。
 - 默认使用 SenseVoice-Small，失败时降级至 faster-whisper 或
   openai-whisper。
 - RSS 提供 Podcasting 2.0 转录时优先采用发布方版本，避免重复 ASR。

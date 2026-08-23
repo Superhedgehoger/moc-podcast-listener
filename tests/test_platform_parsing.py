@@ -711,6 +711,54 @@ class PlatformParsingTests(unittest.TestCase):
         self.assertEqual(info["title"], "YouTube Fixture Episode")
         self.assertTrue(info["audio_url"].endswith("youtube-fixture.m4a"))
 
+    def test_ytdlp_media_ignores_combined_video_url(self) -> None:
+        payload = {
+            "id": "fixture",
+            "title": "Bilibili Lesson",
+            "url": "https://cdn.example.com/video-with-audio.mp4",
+            "formats": [
+                {
+                    "vcodec": "avc1",
+                    "acodec": "mp4a",
+                    "tbr": 1800,
+                    "url": "https://cdn.example.com/video.mp4",
+                },
+                {
+                    "vcodec": "none",
+                    "acodec": "mp4a",
+                    "abr": 96,
+                    "url": "https://cdn.example.com/audio.m4a",
+                },
+            ],
+        }
+        completed = subprocess.CompletedProcess(
+            args=["yt-dlp"], returncode=0, stdout=json.dumps(payload), stderr=""
+        )
+        with patch.object(MODULE, "run_command", return_value=completed):
+            info = MODULE.get_ytdlp_media_info(
+                "https://www.bilibili.com/video/BVfixture", "bilibili"
+            )
+        self.assertEqual(info["audio_url"], "https://cdn.example.com/audio.m4a")
+
+    def test_local_course_video_extracts_audio_track_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "课程 01.mp4"
+            output = Path(tmp) / "lesson.m4a"
+            source.write_bytes(b"video fixture")
+            info = MODULE.resolve_episode_info(str(source))
+
+            def fake_ffmpeg(args, **kwargs):
+                self.assertIn("-vn", args)
+                self.assertEqual(args[args.index("-map") + 1], "0:a:0")
+                output.write_bytes(b"audio fixture")
+                return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+            with patch.object(MODULE, "run_command", side_effect=fake_ffmpeg):
+                downloaded = MODULE.download_audio(str(source), output)
+        self.assertEqual(info["source"], "local_media")
+        self.assertEqual(info["media_kind"], "video")
+        self.assertTrue(downloaded)
+
     def test_domestic_platform_page_audio_fallbacks(self) -> None:
         cases = [
             ("bilibili", "bilibili.html", "bilibili-fixture.mp3"),

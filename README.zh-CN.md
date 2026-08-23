@@ -2,8 +2,8 @@
 
 **简体中文** | [English](README.en.md) | [多语言首页](README.md)
 
-> 版本：v4.7.1
-> 核心流程：输入单集 → 安全解析 → 发布方转录或本地 ASR → Show Notes/章节归档 → Agent 总结 → 产物核验
+> 版本：v4.8.0
+> 核心流程：输入单集或课时 → 安全解析/仅提取音轨 → 发布方转录或本地 ASR → 来源归档 → Agent 总结 → 产物核验
 
 很多播客值得反复查阅，但音频不方便搜索，Show Notes 中的图片和链接也可能失效。
 这个 Skill 的实际作用，是让你只提供一个单集链接，就自动得到一套可保存、可检索、
@@ -54,6 +54,7 @@ cd moc-podcast-listener
 ./listen-and-summarize.sh "https://www.youtube.com/watch?v=xxxxxxxxxxx"
 ./listen-and-summarize.sh "https://overcast.fm/+abcdef"
 ./listen-and-summarize.sh "https://www.bilibili.com/video/BVxxxxxxxxx"
+./listen-and-summarize.sh "$HOME/Courses/课程一/第01课.mp4"
 ./listen-and-summarize.sh "https://music.163.com/#/program?id=xxxxxxxx"
 ./listen-and-summarize.sh "https://www.ximalaya.com/sound/xxxxxxxx"
 ./listen-and-summarize.sh "https://www.lizhi.fm/xxxxxxxx/xxxxxxxx"
@@ -64,7 +65,13 @@ cd moc-podcast-listener
 
 - 小宇宙、Apple Podcasts、Overcast、Podwise.ai、Spotify、Pocket Casts、Castro、Castbox、YouTube、Bilibili、网易云音乐、喜马拉雅、荔枝 FM、Listen Notes、Podbean、iHeart 链接
 - RSS/XML/feed 链接
+- 本地课程音频与视频：MP3、M4A、WAV、FLAC、OGG、Opus、MP4、MKV、MOV、WebM、M4V、AVI、TS
 - 节目名 + 单集标题关键词搜索
+
+YouTube 和 Bilibili 通过 `yt-dlp` 只选择独立音频流，不下载视频画面。输入本地课程视频时，
+脚本使用 `ffmpeg -vn` 只提取第一条音轨；中间音频在完成后默认删除。多课时课程建议每节课
+分别运行一次，这样每节都有独立转录稿、字幕、总结、状态和恢复点。需要保留提取出的音频时
+再加 `--keep-audio`。
 
 快速检查或只归档 Show Notes：
 

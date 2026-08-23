@@ -1,6 +1,6 @@
 ---
 name: moc-podcast-listener
-description: Download and transcribe podcast episodes or supported video/audio pages, archive Show Notes with images and links, and create evidence-backed Chinese summaries. Use when the user provides a podcast episode URL, RSS feed, YouTube or supported Chinese media URL, podcast title/search terms, or asks to listen to, transcribe, archive, or summarize a podcast episode.
+description: Download and transcribe podcast episodes, course lessons, local media, or supported video/audio pages; archive source media and create evidence-backed Chinese summaries. Use when the user provides a podcast/RSS URL, YouTube or Bilibili link, local audio/video course file, podcast title/search terms, or asks to transcribe or summarize spoken long-form content.
 ---
 
 # Podcast Listener
@@ -19,6 +19,8 @@ python3 "<skill-directory>/podcast-listener.py" "EPISODE_URL_OR_SEARCH_TERMS"
 
 The script first uses a publisher-provided Podcasting 2.0 transcript when one is available, then falls back to local ASR. It writes a transcript, timestamp segments, SRT and WebVTT subtitles, metadata, optional Podcasting 2.0 chapters, archived Show Notes, a media manifest, persistent job state, and an `_Agent任务指令.txt` file. Follow the generated instruction file to finish the report.
 
+YouTube and Bilibili resolution must select an audio-only `yt-dlp` format. Do not fall back to a combined video format. Local course files may be audio or video; video input is converted with `ffmpeg -vn` so only its first audio track enters ASR. Process a multi-lesson course as one task per lesson so retries and reports remain independent. Intermediate audio is removed unless the user requests `--keep-audio`.
+
 Use fast modes when a full ASR run is unnecessary:
 
 ```bash
@@ -36,6 +38,7 @@ Use these environment variables only when needed:
 - `OUTPUT_DIR`: Override the default `~/Documents/播客总结`.
 - `ASR_ENGINE`: Choose `sensevoice`, `whisper`, or `stitch`.
 - `WHISPER_MODEL`: Choose the Whisper model; default `large-v3`.
+- `COURSE_AUDIO_BITRATE`: AAC bitrate used when extracting local course video audio; default `128k`.
 - `KEEP_AUDIO=1`: Preserve downloaded audio and WAV files.
 - `FORCE_TRANSCRIBE=1`: Ignore a matching cached transcript.
 - `SHOWNOTES_ASSETS`: Choose `hybrid`, `online`, `local`, or `off`; default `hybrid`.
@@ -56,6 +59,8 @@ Read [references/storage-and-speakers.md](references/storage-and-speakers.md) wh
 ## Summarize
 
 Read [references/report-workflow.md](references/report-workflow.md) before producing a report.
+
+- For a course lesson, preserve the same evidence and citation requirements, but organize the report around learning objectives, concepts, demonstrations, procedures, assignments, and unresolved questions rather than pretending it is a podcast interview.
 
 - For transcripts up to 30,000 Chinese characters, synthesize directly from the transcript and timestamp segments.
 - For longer transcripts, run `chunk_transcript.py` and perform independent evidence extraction per chunk, followed by one reduce/synthesis pass.

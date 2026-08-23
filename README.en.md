@@ -5,10 +5,16 @@
 ## Overview
 
 MOC Podcast Listener is a practical, local-first skill for turning podcast
-episodes into durable research material. It resolves an episode, prefers an
+episodes and course lessons into durable research material. It resolves media, prefers an
 official publisher transcript when available, falls back to local speech
 recognition, archives rich Show Notes, and prepares traceable evidence for an
 agent-generated summary.
+
+For YouTube and Bilibili, the skill selects an audio-only stream instead of
+downloading video. It also accepts local course audio and video files; local
+video is reduced to its first audio track before ASR, and temporary audio is
+deleted after completion unless explicitly retained. Process multi-lesson
+courses one lesson per task for independent retries, transcripts, and reports.
 
 Podcast audio is difficult to search and quote, while images and links in Show
 Notes can disappear over time. Give this skill an episode URL and it produces a
@@ -21,7 +27,7 @@ scrubbing through the audio or organizing files by hand.
 
 The scripts perform deterministic operations:
 
-1. Resolve an episode URL, RSS item, or search query.
+1. Resolve an episode URL, course link, local media file, RSS item, or search query.
 2. Extract episode metadata, audio, Show Notes, and speaker candidates.
 3. Prefer a Podcasting 2.0 publisher transcript; otherwise download and preprocess audio.
 4. Transcribe locally with SenseVoice-Small or Whisper when needed.
@@ -45,6 +51,7 @@ second copy of the complete text.
 - Ximalaya and Lizhi FM
 - Listen Notes, Podbean, and iHeart
 - RSS/XML feeds
+- Local course audio and video files
 - Show name and episode-title search terms
 
 ## Requirements
@@ -81,6 +88,12 @@ Run a full episode:
 
 ```bash
 python3 podcast-listener.py "EPISODE_URL"
+```
+
+Run one local course lesson (video is reduced to audio only):
+
+```bash
+python3 podcast-listener.py "$HOME/Courses/Course One/Lesson 01.mp4"
 ```
 
 Fast Whisper mode:

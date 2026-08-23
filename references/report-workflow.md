@@ -1,6 +1,6 @@
 # Report Workflow
 
-Use this reference when generating the final podcast report.
+Use this reference when generating the final podcast or course-lesson report.
 
 ## Evidence extraction
 
@@ -40,8 +40,13 @@ Suggested minimum summary-body length:
 
 Write the final report to the target path in the generated Agent instruction:
 
+For `local_media` or a user-identified course lesson, use a course-oriented
+title and organize the body around learning objectives, concepts, procedures,
+demonstrations, exercises, and open questions. Keep the same evidence,
+quotation, timestamp, artifact-link, and verification requirements.
+
 ```markdown
-# 播客代听报告
+# 播客代听报告 / 课程转录总结
 
 ## 基本信息
 

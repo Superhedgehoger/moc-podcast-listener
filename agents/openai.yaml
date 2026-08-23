@@ -1,4 +1,4 @@
 interface:
   display_name: "播客代听助手"
-  short_description: "生成可追溯播客转录，归档图文并核验总结产物"
-  default_prompt: "Use $moc-podcast-listener to prefer a publisher transcript when available, create traceable transcript artifacts, archive Show Notes, produce an evidence-backed summary, and verify the completed job."
+  short_description: "转录播客与课程音视频，生成可追溯总结产物"
+  default_prompt: "Use $moc-podcast-listener to transcribe a podcast or course lesson efficiently, prefer existing transcripts and audio-only streams, create traceable transcript artifacts, produce an evidence-backed summary, and verify the completed job."

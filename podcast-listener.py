@@ -63,6 +63,9 @@ PROXY_FAKE_IP_NETWORKS = (
     ipaddress.ip_network("198.18.0.0/15"),
     ipaddress.ip_network("fdfe:dcba:9876::/48"),
 )
+LOCAL_AUDIO_EXTENSIONS = {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav"}
+LOCAL_VIDEO_EXTENSIONS = {".avi", ".m4v", ".mkv", ".mov", ".mp4", ".ts", ".webm"}
+LOCAL_MEDIA_EXTENSIONS = LOCAL_AUDIO_EXTENSIONS | LOCAL_VIDEO_EXTENSIONS
 
 
 def log(msg: str) -> None:
@@ -1977,6 +1980,36 @@ def get_castbox_episode_info(url: str) -> dict[str, Any] | None:
     return None
 
 
+def select_ytdlp_audio_url(
+    info_json: dict[str, Any],
+    page_url: str,
+    *,
+    timeout: int = 45,
+) -> str | None:
+    """Return an audio-only stream URL and never fall back to a video format."""
+    audio_formats = [
+        item
+        for item in info_json.get("formats") or []
+        if item.get("vcodec") == "none"
+        and item.get("acodec") not in (None, "none")
+        and item.get("url")
+    ]
+    audio_formats.sort(
+        key=lambda item: item.get("abr") or item.get("tbr") or 0,
+        reverse=True,
+    )
+    if audio_formats:
+        return str(audio_formats[0]["url"])
+
+    result = run_command(
+        ["yt-dlp", "-g", "-f", "bestaudio", "--no-playlist", page_url],
+        timeout=timeout,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip().splitlines()[0]
+    return None
+
+
 def get_youtube_episode_info(url: str) -> dict[str, Any] | None:
     log(f"解析 YouTube 链接: {url}")
     try:
@@ -1987,23 +2020,7 @@ def get_youtube_episode_info(url: str) -> dict[str, Any] | None:
         if result.returncode == 0 and result.stdout:
             info_json = json.loads(result.stdout)
             title = info_json.get("title") or "YouTube Video"
-            audio_url = None
-            
-            formats = info_json.get("formats", [])
-            audio_formats = [f for f in formats if f.get("vcodec") == "none" and f.get("acodec") != "none"]
-            if audio_formats:
-                audio_formats.sort(key=lambda x: x.get("abr") or x.get("tbr") or 0, reverse=True)
-                audio_url = audio_formats[0].get("url")
-            
-            if not audio_url:
-                g_res = run_command(["yt-dlp", "-g", "-f", "bestaudio", url], timeout=30)
-                if g_res.returncode == 0 and g_res.stdout.strip():
-                    audio_url = g_res.stdout.strip()
-                    
-            if not audio_url:
-                g_res = run_command(["yt-dlp", "-g", url], timeout=30)
-                if g_res.returncode == 0 and g_res.stdout.strip():
-                    audio_url = g_res.stdout.strip()
+            audio_url = select_ytdlp_audio_url(info_json, url, timeout=30)
 
             show_notes = info_json.get("description") or ""
             show_title = info_json.get("uploader") or "YouTube Channel"
@@ -2045,14 +2062,9 @@ def get_ytdlp_media_info(url: str, source: str) -> dict[str, Any] | None:
 
         info_json = json.loads(result.stdout)
         title = info_json.get("title") or f"{source} 音频"
-        formats = info_json.get("formats", [])
-        audio_formats = [
-            item for item in formats
-            if item.get("vcodec") == "none" and item.get("acodec") not in (None, "none") and item.get("url")
-        ]
-        audio_formats.sort(key=lambda item: item.get("abr") or item.get("tbr") or 0, reverse=True)
-        audio_url = (audio_formats[0].get("url") if audio_formats else None) or info_json.get("url")
+        audio_url = select_ytdlp_audio_url(info_json, url)
         if not audio_url:
+            warn(f"{source} 没有可用的纯音频格式，拒绝下载视频格式")
             return None
 
         upload_date = info_json.get("upload_date") or time.strftime("%Y%m%d")
@@ -2414,10 +2426,41 @@ def resolve_url_info(url: str) -> dict[str, Any] | None:
     return search_episode_info(title)
 
 
+def resolve_local_media_info(input_value: str) -> dict[str, Any] | None:
+    candidate = Path(input_value).expanduser()
+    if not candidate.is_file() or candidate.suffix.lower() not in LOCAL_MEDIA_EXTENSIONS:
+        return None
+    path = candidate.resolve()
+    modified = time.localtime(path.stat().st_mtime)
+    media_kind = "audio" if path.suffix.lower() in LOCAL_AUDIO_EXTENSIONS else "video"
+    title = clean_text(path.stem.replace("_", " ").replace("-", " ")) or path.stem
+    return {
+        "id": safe_filename(path.stem, "local-media"),
+        "title": title,
+        "url": path.as_uri(),
+        "audio_url": str(path),
+        "cover_url": "",
+        "show_notes": f"本地课程{'视频' if media_kind == 'video' else '音频'}：{path.name}",
+        "guests": [],
+        "duration_minutes": 0.0,
+        "show_title": path.parent.name or "本地课程",
+        "pub_date": time.strftime("%Y%m%d", modified),
+        "source": "local_media",
+        "media_kind": media_kind,
+        "local_media_path": str(path),
+    }
+
+
 def resolve_episode_info(input_value: str) -> dict[str, Any] | None:
     value = input_value.strip()
     if not value:
         return None
+
+    local_info = resolve_local_media_info(value)
+    if local_info:
+        media_label = "视频" if local_info["media_kind"] == "video" else "音频"
+        log(f"识别本地课程{media_label}: {local_info['local_media_path']}")
+        return local_info
 
     # 提取可能的标题与 URL
     extracted_title, extracted_url = extract_rich_text_link(value)
@@ -2458,6 +2501,37 @@ def download_audio(audio_url: str, output_path: Path) -> bool:
     log(f"下载音频: {audio_url[:80]}...")
     dl_timeout = int(os.environ.get("DOWNLOAD_TIMEOUT", "1800"))
     try:
+        parsed_audio = urlparse(audio_url)
+        local_path = Path(audio_url).expanduser() if not parsed_audio.scheme else None
+        if local_path and local_path.is_file():
+            if local_path.suffix.lower() in LOCAL_AUDIO_EXTENSIONS:
+                shutil.copyfile(local_path, output_path)
+                log(f"读取本地音频: {local_path.name}")
+                return output_path.is_file() and output_path.stat().st_size > 0
+            result = run_command(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(local_path),
+                    "-map",
+                    "0:a:0",
+                    "-vn",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    os.environ.get("COURSE_AUDIO_BITRATE", "128k"),
+                    str(output_path),
+                ],
+                timeout=dl_timeout,
+            )
+            if result.returncode == 0 and output_path.is_file() and output_path.stat().st_size > 0:
+                size_mb = output_path.stat().st_size / 1024 / 1024
+                log(f"本地视频音轨提取完成: {size_mb:.1f} MB")
+                return True
+            error(f"本地视频音轨提取失败: {result.stderr.strip()[-800:]}")
+            return False
+
         if ".m3u8" in audio_url.lower():
             response, final_url = open_safe_http(
                 audio_url,
@@ -4201,10 +4275,14 @@ def run_verify(output_dir: Path, target: str, *, require_report: bool) -> int:
 
 def parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="解析、归档并转录播客链接、RSS、媒体页面或节目搜索词。"
+        description="解析、归档并转录播客链接、课程音视频、RSS、媒体页面或节目搜索词。"
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument("input", nargs="*", help="单集链接、带标题链接或搜索关键词")
+    parser.add_argument(
+        "input",
+        nargs="*",
+        help="单集/课程链接、本地音视频文件、带标题链接或搜索关键词",
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--resolve-only",
@@ -4639,6 +4717,8 @@ def main() -> None:
 
     parsed_url = urlparse(str(info.get("audio_url") or ""))
     ext = os.path.splitext(parsed_url.path)[1]
+    if info.get("source") == "local_media" and info.get("media_kind") == "video":
+        ext = ".m4a"
     if not ext or len(ext) > 5 or ext.lower() in {".m3u8", ".m3u"}:
         ext = ".m4a"
 

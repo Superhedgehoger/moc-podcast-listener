@@ -208,7 +208,7 @@ class ArchiveTests(unittest.TestCase):
             PODCAST, "is_safe_remote_url", return_value=(True, None)
         ), patch.object(PODCAST, "run_command", side_effect=fake_run) as command:
             summary = PODCAST.snapshot_shownotes_links(
-                links, Path(tmp), "fixture", "singlefile"
+                links, Path(tmp), "singlefile"
             )
 
         self.assertEqual(summary["requested"], 1)

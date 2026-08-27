@@ -159,8 +159,44 @@ Recognized text...
 --- End of transcript ---
 ```
 
-Use `_segments.json` as the machine-readable source for precise timestamp
+Use the episode package's `转录数据/segments.json` as the machine-readable source for precise timestamp
 verification.
+
+## Output Layout
+
+The top-level reading folders stay intentionally small: `转录稿/` contains
+only the readable transcript, while `总结稿/` contains the final report. All
+machine-readable files live in one per-episode package:
+
+```text
+~/Documents/播客总结/
+├── 转录稿/
+│   └── *_转录稿.txt
+├── 总结稿/
+│   └── *_详细总结.md
+└── 资料/
+    └── {show}_{episode}_{date}/
+        ├── metadata.json
+        ├── Agent任务指令.txt
+        ├── 转录数据/
+        │   ├── segments.json
+        │   ├── transcript.srt
+        │   └── transcript.vtt
+        └── Show Notes/
+            ├── shownotes.md
+            ├── source.raw.html
+            ├── media-manifest.json
+            └── 图片/
+```
+
+To migrate a legacy flat output folder, preview the operation first and then
+apply it. The apply command backs up affected files under `.backup/` and
+rewrites local links in transcripts, reports, manifests, and job state:
+
+```bash
+python3 scripts/migrate_output_layout.py "$HOME/Documents/播客总结"
+python3 scripts/migrate_output_layout.py "$HOME/Documents/播客总结" --apply
+```
 
 ## Show Notes Storage
 

@@ -1,5 +1,11 @@
 # 更新日志 (Changelog)
 
+## v4.9.0 (2026-08-28)
+- 顶层只保留面向阅读的 `总结稿/` 和 `转录稿/`；转录目录只写一个人类可读 `.txt`
+- 每期技术附件统一归入 `资料/<节目_标题_日期>/`，集中保存字幕、segments、元数据、任务指令、Show Notes、图片和可选链接快照
+- Show Notes 使用自包含子目录：`shownotes.md`、`source.raw.html`、`media-manifest.json` 和 `图片/`
+- 继续兼容旧版平铺转录附件、Show Notes manifest、图片缓存与历史作业验证
+
 ## v4.8.0 (2026-08-23)
 - YouTube 与 Bilibili 统一只选择 `yt-dlp` 的纯音频格式，不再回退到可能包含视频的默认直链
 - 支持直接输入本地课程音频或视频文件；视频使用 `ffmpeg -vn` 仅提取第一条音轨后转录

@@ -23,8 +23,16 @@ SUPPORTED_BACKENDS = {"local", "webdav", "s3"}
 
 
 def _archive_id(manifest_path: Path) -> str:
+    if manifest_path.name == "media-manifest.json":
+        return manifest_path.parent.name
     suffix = "_media-manifest.json"
     return manifest_path.name[: -len(suffix)] if manifest_path.name.endswith(suffix) else manifest_path.stem
+
+
+def _sync_manifest_path(manifest_path: Path) -> Path:
+    if manifest_path.name == "media-manifest.json":
+        return manifest_path.with_name("sync-manifest.json")
+    return manifest_path.with_name(f"{_archive_id(manifest_path)}_sync-manifest.json")
 
 
 def _public_url(base_url: str, key: str) -> str:
@@ -247,9 +255,7 @@ def sync_archive(
         ],
         "synced_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
-    sync_manifest_path = manifest_path.with_name(
-        f"{_archive_id(manifest_path)}_sync-manifest.json"
-    )
+    sync_manifest_path = _sync_manifest_path(manifest_path)
     sync_result["sync_manifest_path"] = str(sync_manifest_path)
     manifest["sync"] = sync_result
     manifest_path.write_text(
@@ -294,7 +300,7 @@ def sync_archive(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="同步已归档的 Show Notes 和图片。")
-    parser.add_argument("manifest", help="*_media-manifest.json 路径")
+    parser.add_argument("manifest", help="media-manifest.json 或旧版 *_media-manifest.json 路径")
     parser.add_argument("--backend", choices=tuple(sorted(SUPPORTED_BACKENDS)))
     parser.add_argument("--destination")
     parser.add_argument("--public-base-url")

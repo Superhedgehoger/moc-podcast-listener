@@ -19,6 +19,10 @@ python3 "<skill-directory>/podcast-listener.py" "EPISODE_URL_OR_SEARCH_TERMS"
 
 The script first uses a publisher-provided Podcasting 2.0 transcript when one is available, then falls back to local ASR. It writes a transcript, timestamp segments, SRT and WebVTT subtitles, metadata, optional Podcasting 2.0 chapters, archived Show Notes, a media manifest, persistent job state, and an `_Agent任务指令.txt` file. Follow the generated instruction file to finish the report.
 
+Human-facing folders stay minimal: `转录稿/` contains only readable transcript
+text and `总结稿/` contains reports. Treat files under
+`资料/<show>_<episode>_<date>/` as the episode's machine-readable package.
+
 YouTube and Bilibili resolution must select an audio-only `yt-dlp` format. Do not fall back to a combined video format. Local course files may be audio or video; video input is converted with `ffmpeg -vn` so only its first audio track enters ASR. Process a multi-lesson course as one task per lesson so retries and reports remain independent. Intermediate audio is removed unless the user requests `--keep-audio`.
 
 Use fast modes when a full ASR run is unnecessary:
@@ -66,7 +70,7 @@ Read [references/report-workflow.md](references/report-workflow.md) before produ
 - For longer transcripts, run `chunk_transcript.py` and perform independent evidence extraction per chunk, followed by one reduce/synthesis pass.
 - Never infer a real speaker name from an unlabelled transcript or an anonymous `SPEAKER_00` label. Use `说话人未确认` when identity is not supported.
 - Attach timestamps to quotations whenever segment data is available.
-- Preserve the archived Show Notes Markdown verbatim in the final report so episode artwork and relative image paths remain valid.
+- Preserve the archived Show Notes content and online links in the final report. Rebase only local relative asset paths from the Show Notes file location to the report location so archived images remain valid in both files.
 - Keep the transcript as a separate source document. In the report, describe it and link the transcript, segments JSON, SRT, WebVTT, and archived chapter JSON when present, using paths relative to the report; never embed the complete transcript.
 - Name artifacts from the podcast show, episode title, and publication date. Do not add distribution platform names such as Overcast or 小宇宙 to filenames.
 - Do not claim that a URL or image was archived unless its manifest entry reports success.

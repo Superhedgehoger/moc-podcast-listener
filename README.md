@@ -117,22 +117,31 @@ downloaded audio, generated transcripts, or storage credentials.
 ├── .jobs/{job-id}/
 │   ├── status.json
 │   └── result.json
-├── *_metadata.json
-├── *_Agent任务指令.txt
 ├── 转录稿/
-│   ├── *_转录稿.txt
-│   ├── *_segments.json
-│   ├── *.srt
-│   ├── *.vtt
-│   └── *_chapters.json (when available)
+│   └── *_转录稿.txt
 ├── 总结稿/
 │   └── *_详细总结.md
-├── Show Notes/
-│   ├── *_shownotes.md
-│   ├── *_shownotes.raw.html
-│   └── *_media-manifest.json
-└── 图片/
-    └── *_assets/
+└── 资料/
+    └── {show}_{episode}_{date}/
+        ├── metadata.json
+        ├── Agent任务指令.txt
+        ├── 转录数据/
+        │   ├── segments.json
+        │   ├── transcript.srt
+        │   ├── transcript.vtt
+        │   └── chapters.json (when available)
+        └── Show Notes/
+            ├── shownotes.md
+            ├── source.raw.html
+            ├── media-manifest.json
+            └── 图片/
+```
+
+旧版平铺目录 / Legacy flat output migration:
+
+```bash
+python3 scripts/migrate_output_layout.py "$HOME/Documents/播客总结"
+python3 scripts/migrate_output_layout.py "$HOME/Documents/播客总结" --apply
 ```
 
 ## Validation / 验证

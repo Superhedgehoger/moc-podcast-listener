@@ -11,6 +11,12 @@ The original source URL is always retained in the Show Notes and media manifest.
 Manifest schema v2 records each image's source URL, final URL, HTTP status,
 fetch time, MIME type, byte size, local path, and failure reason when relevant.
 
+Each episode's machine-readable package is stored under
+`资料/<show_title>_<episode_title>_<date>/`. Its `Show Notes/` folder contains
+`shownotes.md`, `source.raw.html`, `media-manifest.json`, and `图片/`. The
+Markdown uses paths relative to its own folder; when embedding it in a report,
+rebase local paths to the report directory.
+
 ## Local Sync Folder
 
 ```bash

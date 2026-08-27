@@ -1130,8 +1130,7 @@ def download_shownotes_image(
 
 def snapshot_shownotes_links(
     links: list[dict[str, Any]],
-    output_dir: Path,
-    combined_name: str,
+    archive_dir: Path,
     mode: str,
 ) -> dict[str, Any]:
     """Optionally archive a bounded number of first-level Show Notes links."""
@@ -1162,7 +1161,7 @@ def snapshot_shownotes_links(
         max_links = SHOWNOTES_DEFAULT_MAX_LINK_SNAPSHOTS
         warn("SHOWNOTES_MAX_LINK_SNAPSHOTS 无效，将使用默认值 10")
 
-    snapshots_dir = output_dir / "链接快照" / f"{combined_name}_links"
+    snapshots_dir = archive_dir / "链接快照"
     snapshots_dir.mkdir(parents=True, exist_ok=True)
     summary["directory"] = str(snapshots_dir)
     binary_name = (
@@ -1267,35 +1266,42 @@ def archive_show_notes(info: dict[str, Any], output_dir: Path, combined_name: st
     if mode == "off":
         return None
 
-    shownotes_dir = output_dir / "Show Notes"
-    assets_dir = output_dir / "图片" / f"{combined_name}_assets"
+    episode_dir = output_dir / "资料" / combined_name
+    shownotes_dir = episode_dir / "Show Notes"
+    assets_dir = shownotes_dir / "图片"
     shownotes_dir.mkdir(parents=True, exist_ok=True)
     if mode in {"local", "hybrid"}:
         assets_dir.mkdir(parents=True, exist_ok=True)
 
-    html_path = shownotes_dir / f"{combined_name}_shownotes.raw.html"
-    markdown_path = shownotes_dir / f"{combined_name}_shownotes.md"
-    manifest_path = shownotes_dir / f"{combined_name}_media-manifest.json"
+    html_path = shownotes_dir / "source.raw.html"
+    markdown_path = shownotes_dir / "shownotes.md"
+    manifest_path = shownotes_dir / "media-manifest.json"
+    legacy_manifest_path = output_dir / "Show Notes" / f"{combined_name}_media-manifest.json"
 
     images: list[dict[str, Any]] = []
     seen_images: dict[str, str] = {}
     seen_hashes: dict[str, str] = {}
     cached_images: dict[str, dict[str, Any]] = {}
-    if manifest_path.exists():
+    cache_manifest_path = manifest_path if manifest_path.exists() else legacy_manifest_path
+    if cache_manifest_path.exists():
         try:
-            previous_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            previous_manifest = json.loads(cache_manifest_path.read_text(encoding="utf-8"))
             for entry in previous_manifest.get("images") or []:
                 source_url = entry.get("source_url")
                 previous_path = entry.get("path")
                 if not source_url or not previous_path or not entry.get("ok"):
                     continue
                 candidate = assets_dir / Path(previous_path).name
+                previous_file = Path(previous_path).expanduser()
+                if not candidate.exists() and previous_file.is_file():
+                    candidate.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(previous_file, candidate)
                 if candidate.exists() and candidate.is_file():
                     cached_entry = dict(entry)
                     cached_entry["path"] = str(candidate)
                     cached_images[source_url] = cached_entry
         except (OSError, json.JSONDecodeError, AttributeError):
-            warn(f"已有 Show Notes manifest 不可读，将重新归档: {manifest_path}")
+            warn(f"已有 Show Notes manifest 不可读，将重新归档: {cache_manifest_path}")
     max_images = max(0, int(os.environ.get("SHOWNOTES_MAX_IMAGES", str(SHOWNOTES_DEFAULT_MAX_IMAGES))))
     max_image_bytes = max(
         1,
@@ -1426,13 +1432,13 @@ def archive_show_notes(info: dict[str, Any], output_dir: Path, combined_name: st
     snapshot_mode = os.environ.get("SHOWNOTES_LINK_SNAPSHOT", "none").lower().strip()
     snapshot_summary = snapshot_shownotes_links(
         links,
-        output_dir,
-        combined_name,
+        shownotes_dir,
         snapshot_mode,
     )
 
     manifest = {
         "schema_version": 2,
+        "layout": "episode_directory",
         "mode": mode,
         "episode_url": info.get("url"),
         "title": info.get("title"),
@@ -1451,6 +1457,7 @@ def archive_show_notes(info: dict[str, Any], output_dir: Path, combined_name: st
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
     )
     return {
+        "archive_dir": str(shownotes_dir),
         "raw_html_path": str(html_path),
         "markdown_path": str(markdown_path),
         "manifest_path": str(manifest_path),
@@ -2501,6 +2508,7 @@ def download_audio(audio_url: str, output_path: Path) -> bool:
     log(f"下载音频: {audio_url[:80]}...")
     dl_timeout = int(os.environ.get("DOWNLOAD_TIMEOUT", "1800"))
     try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         parsed_audio = urlparse(audio_url)
         local_path = Path(audio_url).expanduser() if not parsed_audio.scheme else None
         if local_path and local_path.is_file():
@@ -2886,7 +2894,7 @@ def load_publisher_transcript(
         source_url = str(candidate["url"])
         media_type = str(candidate["type"])
         extension = publisher_transcript_extension(media_type, source_url)
-        source_path = transcript_dir / f"{combined_name}_publisher_{index:02d}{extension}"
+        source_path = transcript_dir / f"publisher-{index:02d}{extension}"
         downloaded = download_http_resource(
             source_url,
             source_path,
@@ -2946,8 +2954,8 @@ def archive_episode_chapters(
         return None
 
     source_url = str(chapter_source["url"])
-    source_path = transcript_dir / f"{combined_name}_chapters.source.json"
-    chapter_path = transcript_dir / f"{combined_name}_chapters.json"
+    source_path = transcript_dir / "chapters.source.json"
+    chapter_path = transcript_dir / "chapters.json"
     downloaded = download_http_resource(
         source_url,
         source_path,
@@ -4622,16 +4630,22 @@ def main() -> None:
 
     transcript_dir.mkdir(parents=True, exist_ok=True)
     summary_dir.mkdir(parents=True, exist_ok=True)
-    audio_dir.mkdir(parents=True, exist_ok=True)
 
     combined_name = build_combined_name(info)
 
+    episode_dir = output_dir / "资料" / combined_name
+    transcript_data_dir = episode_dir / "转录数据"
+    episode_dir.mkdir(parents=True, exist_ok=True)
+    transcript_data_dir.mkdir(parents=True, exist_ok=True)
+
     transcript_path = transcript_dir / f"{combined_name}_转录稿.txt"
-    segments_path = transcript_dir / f"{combined_name}_segments.json"
-    srt_path = transcript_dir / f"{combined_name}.srt"
-    vtt_path = transcript_dir / f"{combined_name}.vtt"
-    metadata_path = output_dir / f"{combined_name}_metadata.json"
-    instruction_path = output_dir / f"{combined_name}_Agent任务指令.txt"
+    segments_path = transcript_data_dir / "segments.json"
+    srt_path = transcript_data_dir / "transcript.srt"
+    vtt_path = transcript_data_dir / "transcript.vtt"
+    metadata_path = episode_dir / "metadata.json"
+    instruction_path = episode_dir / "Agent任务指令.txt"
+    legacy_segments_path = transcript_dir / f"{combined_name}_segments.json"
+    legacy_metadata_path = output_dir / f"{combined_name}_metadata.json"
 
     if tracker:
         tracker.phase("archiving")
@@ -4678,7 +4692,7 @@ def main() -> None:
         info["chapters_archive"] = chapters_archive
         log("复用作业检查点中的章节归档")
     else:
-        chapters_archive = archive_episode_chapters(info, transcript_dir, combined_name)
+        chapters_archive = archive_episode_chapters(info, transcript_data_dir, combined_name)
         if tracker:
             tracker.checkpoint("chapters_archive", chapters_archive)
     if chapters_archive and chapters_archive.get("ok"):
@@ -4703,6 +4717,7 @@ def main() -> None:
         payload = {
             "mode": "archive-only",
             "episode": info,
+            "episode_dir": str(episode_dir),
             "metadata_path": str(metadata_path),
             "shownotes_archive": shownotes_archive,
             "chapters_archive": chapters_archive,
@@ -4730,8 +4745,10 @@ def main() -> None:
     try:
         if tracker:
             tracker.phase("acquiring_transcript")
+        cache_segments_path = segments_path if segments_path.exists() else legacy_segments_path
+        cache_metadata_path = metadata_path if metadata_path.exists() else legacy_metadata_path
         cached = None if force_transcribe else load_cached_transcription(
-            transcript_path, segments_path, metadata_path, info
+            transcript_path, cache_segments_path, cache_metadata_path, info
         )
         cached_model = str(cached[0].get("model") or "") if cached else ""
         publisher_transcription = None
@@ -4740,7 +4757,7 @@ def main() -> None:
         ):
             publisher_transcription = load_publisher_transcript(
                 info,
-                transcript_dir,
+                transcript_data_dir,
                 combined_name,
             )
 
@@ -4878,7 +4895,11 @@ def main() -> None:
         )
 
         chunk_script = Path(__file__).with_name("chunk_transcript.py")
-        chunk_command = f'"{sys.executable}" "{chunk_script}" "{transcript_path}"'
+        chunk_dir = transcript_data_dir / "分块"
+        chunk_command = (
+            f'"{sys.executable}" "{chunk_script}" "{transcript_path}" '
+            f'--output-dir "{chunk_dir}"'
+        )
         instruction = build_agent_instruction(
             transcript_path=transcript_path,
             segments_path=segments_path,
@@ -4901,6 +4922,7 @@ def main() -> None:
             "reused_transcript": used_cached_transcript,
             "transcription_source": transcription.get("source") or "asr",
             "transcript_path": str(transcript_path),
+            "episode_dir": str(episode_dir),
             "segments_path": str(segments_path),
             "srt_path": str(srt_path),
             "vtt_path": str(vtt_path),
@@ -4947,6 +4969,11 @@ def main() -> None:
                 log(f"保留音频文件: {audio_path}")
                 if wav_path.exists():
                     log(f"保留 WAV 文件: {wav_path}")
+        if not keep_audio:
+            try:
+                audio_dir.rmdir()
+            except OSError:
+                pass
 
 
 def cli_entrypoint() -> None:

@@ -28,6 +28,14 @@ PODCAST = load_module("podcast_listener_storage_test", "podcast-listener.py")
 
 
 class MediaStoreTests(unittest.TestCase):
+    def test_episode_directory_manifest_uses_parent_as_archive_id(self) -> None:
+        manifest = Path("Show Notes") / "fixture_episode" / "media-manifest.json"
+        self.assertEqual(MEDIA_STORE._archive_id(manifest), "fixture_episode")
+        self.assertEqual(
+            MEDIA_STORE._sync_manifest_path(manifest),
+            manifest.with_name("sync-manifest.json"),
+        )
+
     def test_local_sync_copies_archive_and_rewrites_public_image(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

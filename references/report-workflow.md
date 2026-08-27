@@ -77,7 +77,10 @@ Use exact transcript wording. Add `[HH:MM:SS]` when available and do not guess t
 
 ## Show Notes
 
-Insert the archived Show Notes Markdown verbatim.
+Insert the complete archived Show Notes Markdown. Preserve its text and online
+links, but rebase local relative image or snapshot paths from the archived
+`shownotes.md` directory to the final report directory. Do not copy a path
+verbatim when that would make the report link resolve to a different file.
 
 ## 转录稿
 
@@ -90,13 +93,13 @@ the full transcript into the report. When metadata says the source is
 Example:
 
 - [独立转录稿](<../转录稿/{节目名称}_{播客标题}_{发布日期}_转录稿.txt>)
-- [时间戳分段](<../转录稿/{节目名称}_{播客标题}_{发布日期}_segments.json>)
-- [SRT 字幕](<../转录稿/{节目名称}_{播客标题}_{发布日期}.srt>)
-- [WebVTT 字幕](<../转录稿/{节目名称}_{播客标题}_{发布日期}.vtt>)
-- [章节数据](<../转录稿/{节目名称}_{播客标题}_{发布日期}_chapters.json>)（存在时）
+- [时间戳分段](<../资料/{节目名称}_{播客标题}_{发布日期}/转录数据/segments.json>)
+- [SRT 字幕](<../资料/{节目名称}_{播客标题}_{发布日期}/转录数据/transcript.srt>)
+- [WebVTT 字幕](<../资料/{节目名称}_{播客标题}_{发布日期}/转录数据/transcript.vtt>)
+- [章节数据](<../资料/{节目名称}_{播客标题}_{发布日期}/转录数据/chapters.json>)（存在时）
 ```
 
-Before finalizing, verify all quotations, preserve image-relative paths, list
+Before finalizing, verify all quotations, rebase and preserve image-relative paths, list
 failed media downloads from the manifest, and confirm every transcript link
 resolves from the report directory. Then run the exact `--verify JOB_ID
 --require-report` command from `_Agent任务指令.txt`. Do not report the podcast

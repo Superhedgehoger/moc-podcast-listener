@@ -152,6 +152,11 @@ class PlatformParsingTests(unittest.TestCase):
         ):
             archived = MODULE.archive_show_notes(info, Path(tmp), "fixture")
             manifest = json.loads(Path(archived["manifest_path"]).read_text(encoding="utf-8"))
+            archive_dir = Path(tmp) / "资料" / "fixture" / "Show Notes"
+            self.assertEqual(Path(archived["archive_dir"]), archive_dir)
+            self.assertEqual(Path(archived["markdown_path"]), archive_dir / "shownotes.md")
+            self.assertEqual(Path(archived["raw_html_path"]), archive_dir / "source.raw.html")
+            self.assertEqual(Path(archived["manifest_path"]), archive_dir / "media-manifest.json")
         urls = {item["url"] for item in manifest["links"]}
         self.assertIn("https://example.com/site", urls)
         self.assertIn("https://example.com/article", urls)
@@ -190,14 +195,18 @@ class PlatformParsingTests(unittest.TestCase):
             "download_shownotes_image",
             return_value={
                 "ok": True,
-                "path": str(Path(tmp) / "图片" / "fixture_assets" / "cover.jpg"),
+                "path": str(
+                    Path(tmp) / "资料" / "fixture" / "Show Notes" / "图片" / "cover.jpg"
+                ),
                 "sha256": "cover-hash",
                 "final_url": info["cover_url"],
                 "content_type": "image/jpeg",
                 "bytes": 7,
             },
         ):
-            image_path = Path(tmp) / "图片" / "fixture_assets" / "cover.jpg"
+            image_path = (
+                Path(tmp) / "资料" / "fixture" / "Show Notes" / "图片" / "cover.jpg"
+            )
             image_path.parent.mkdir(parents=True)
             image_path.write_bytes(b"fixture")
             archived = MODULE.archive_show_notes(info, Path(tmp), "fixture")
@@ -208,6 +217,7 @@ class PlatformParsingTests(unittest.TestCase):
         self.assertEqual(manifest["cover_url"], info["cover_url"])
         self.assertIn("Show 封面", markdown)
         self.assertIn("未提供 Show Notes 正文", markdown)
+        self.assertIn("图片/cover.jpg", markdown)
 
     def test_shownotes_archive_reuses_manifest_image(self) -> None:
         info = {
@@ -245,8 +255,13 @@ class PlatformParsingTests(unittest.TestCase):
             ), patch.object(MODULE, "download_shownotes_image") as download:
                 archived = MODULE.archive_show_notes(info, output, "fixture")
             manifest = json.loads(Path(archived["manifest_path"]).read_text(encoding="utf-8"))
+            migrated_image_exists = (
+                output / "资料" / "fixture" / "Show Notes" / "图片" / image_path.name
+            ).is_file()
         download.assert_not_called()
         self.assertTrue(manifest["images"][0]["reused"])
+        self.assertEqual(manifest["layout"], "episode_directory")
+        self.assertTrue(migrated_image_exists)
 
     def test_transcript_segments_write_json_and_srt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -341,7 +356,7 @@ class PlatformParsingTests(unittest.TestCase):
             MODULE, "download_audio"
         ) as download, patch.object(MODULE, "transcribe_with_fallback") as transcribe:
             MODULE.main()
-            metadata_files = list(Path(tmp).glob("*_metadata.json"))
+            metadata_files = list(Path(tmp).glob("资料/*/metadata.json"))
         download.assert_not_called()
         transcribe.assert_not_called()
         self.assertEqual(len(metadata_files), 1)
@@ -395,11 +410,29 @@ class PlatformParsingTests(unittest.TestCase):
                 MODULE, "transcribe_with_fallback"
             ) as transcribe:
                 MODULE.main()
-                instruction_files = list(output.glob("*_Agent任务指令.txt"))
+                instruction_files = list(output.glob("资料/*/Agent任务指令.txt"))
                 rendered_transcript = transcript_path.read_text(encoding="utf-8")
+                episode_dir = output / "资料" / combined
+                package_files_exist = all(
+                    path.is_file()
+                    for path in (
+                        episode_dir / "转录数据" / "segments.json",
+                        episode_dir / "转录数据" / "transcript.srt",
+                        episode_dir / "转录数据" / "transcript.vtt",
+                        episode_dir / "metadata.json",
+                    )
+                )
+                transcript_entries = list(transcript_dir.iterdir())
         download.assert_not_called()
         transcribe.assert_not_called()
         self.assertEqual(len(instruction_files), 1)
+        self.assertTrue(package_files_exist)
+        self.assertEqual(
+            set(transcript_entries),
+            {transcript_path, segments_path},
+        )
+        self.assertFalse(any(path.suffix in {".srt", ".vtt"} for path in transcript_entries))
+        self.assertFalse((output / "音频").exists())
         self.assertEqual(rendered_transcript.count("# 播客转录稿"), 1)
         self.assertIn("- 原始链接：https://episode.example/item", rendered_transcript)
         self.assertIn("[00:00:00 - 00:00:02]", rendered_transcript)

@@ -2,7 +2,7 @@
 
 **简体中文** | [English](README.en.md) | [多语言首页](README.md)
 
-> 版本：v4.8.0
+> 版本：v4.9.0
 > 核心流程：输入单集或课时 → 安全解析/仅提取音轨 → 发布方转录或本地 ASR → 来源归档 → Agent 总结 → 产物核验
 
 很多播客值得反复查阅，但音频不方便搜索，Show Notes 中的图片和链接也可能失效。
@@ -14,6 +14,9 @@
 项目先生成可独立阅读和追溯的转录稿。深度总结由 Agent 按 `SKILL.md` 和
 `references/report-workflow.md` 读取证据后完成；总结稿只链接转录稿，不再复制
 整篇转录正文。这样既减少重复文件，也让原始材料与观点整理保持清晰边界。
+
+输出目录以人类阅读为先：`转录稿/` 只放可直接阅读的 `.txt`，`总结稿/` 只放
+最终总结；字幕、JSON、图片和任务状态统一收进每期 `资料/` 包。
 
 
 ---
@@ -106,28 +109,26 @@ python3 podcast-listener.py --output-dir "$HOME/Documents/播客总结" \
 │   ├── status.json
 │   ├── result.json
 │   └── verification.json
-├── {节目名称}_{播客标题}_{发布日期}_metadata.json
-├── {节目名称}_{播客标题}_{发布日期}_Agent任务指令.txt
-├── 音频/
-│   ├── {节目名称}_{播客标题}_{发布日期}.m4a (或 .mp3)
-│   └── {节目名称}_{播客标题}_{发布日期}.wav
 ├── 转录稿/
-│   ├── {节目名称}_{播客标题}_{发布日期}_转录稿.txt
-│   ├── {节目名称}_{播客标题}_{发布日期}_segments.json
-│   ├── {节目名称}_{播客标题}_{发布日期}.srt
-│   ├── {节目名称}_{播客标题}_{发布日期}.vtt
-│   └── {节目名称}_{播客标题}_{发布日期}_chapters.json（RSS 提供时）
+│   └── {节目名称}_{播客标题}_{发布日期}_转录稿.txt
 ├── 总结稿/
 │   └── {节目名称}_{播客标题}_{发布日期}_详细总结.md
-├── Show Notes/
-│   ├── {节目名称}_{播客标题}_{发布日期}_shownotes.md
-│   ├── {节目名称}_{播客标题}_{发布日期}_shownotes.raw.html
-│   └── {节目名称}_{播客标题}_{发布日期}_media-manifest.json
-├── 图片/
-│   └── {节目名称}_{播客标题}_{发布日期}_assets/
-│       └── image-01-{hash}.jpg
-└── 链接快照/（显式启用时）
-    └── {节目名称}_{播客标题}_{发布日期}_links/
+└── 资料/
+    └── {节目名称}_{播客标题}_{发布日期}/
+        ├── metadata.json
+        ├── Agent任务指令.txt
+        ├── 转录数据/
+        │   ├── segments.json
+        │   ├── transcript.srt
+        │   ├── transcript.vtt
+        │   ├── chapters.json（RSS 提供时）
+        │   └── 分块/（超长转录需要时）
+        └── Show Notes/
+            ├── shownotes.md
+            ├── source.raw.html
+            ├── media-manifest.json
+            ├── 图片/
+            └── 链接快照/（显式启用时）
 ```
 
 把终端打印出的 Agent 任务指令交给 Agent 继续执行即可。最终报告由 Agent 写入：
@@ -137,9 +138,17 @@ python3 podcast-listener.py --output-dir "$HOME/Documents/播客总结" \
 └── {节目名称}_{播客标题}_{发布日期}_详细总结.md
 ```
 
-总结稿中的「转录稿」章节只介绍独立转录文件，并使用相对路径链接
-`_转录稿.txt`、`_segments.json`、`.srt`、`.vtt`，以及存在时的章节 JSON。
+总结稿中的「转录稿」章节只介绍独立转录文件，并使用相对路径链接人类可读的
+`_转录稿.txt`，以及 `资料/` 中的 segments、SRT、VTT 和可选章节 JSON。
 完整转录正文不会再次嵌入总结稿。
+
+旧版本生成的平铺目录可先预览、再迁移。正式迁移默认会把受影响文件备份到
+`.backup/`，并同步修正转录稿、总结稿、Manifest 与作业状态中的本地路径：
+
+```bash
+python3 scripts/migrate_output_layout.py "$HOME/Documents/播客总结"
+python3 scripts/migrate_output_layout.py "$HOME/Documents/播客总结" --apply
+```
 
 ---
 
@@ -156,7 +165,7 @@ ffmpeg 转换为单声道 WAV；VAD 需要时内部生成 16kHz 临时副本
   ↓
 SenseVoice-Small 转录（默认，模型单例缓存）→ faster-whisper/openai-whisper 备用
   ↓
-Show Notes 转 Markdown；单集封面始终进入 manifest，封面和正文图片下载到同级「图片」目录，链接保留原 URL
+Show Notes 转 Markdown；单集封面始终进入 manifest，封面和正文图片进入每期资料包，链接保留原 URL
   ↓
 保存转录稿、时间戳、SRT、WebVTT、章节、元数据、作业状态和 Agent 指令
 ```
@@ -187,17 +196,17 @@ Whisper 会使用 `initial_prompt` 注入节目标题和嘉宾/说话人候选�
 ## 附件与来源
 
 - 原始页面：https://...
-- 时间戳分段：同目录 segments.json
-- SRT 字幕：同目录 .srt
-- WebVTT 字幕：同目录 .vtt
-- Podcasting 2.0 章节：同目录 chapters.json（存在时）
-- 元数据：上级目录 metadata.json
-- Show Notes：上级目录 Show Notes/...
+- 时间戳分段：`../资料/{节目名称}_{播客标题}_{发布日期}/转录数据/segments.json`
+- SRT 字幕：`../资料/{节目名称}_{播客标题}_{发布日期}/转录数据/transcript.srt`
+- WebVTT 字幕：`../资料/{节目名称}_{播客标题}_{发布日期}/转录数据/transcript.vtt`
+- Podcasting 2.0 章节：同一资料包中的 `chapters.json`（存在时）
+- 元数据：`../资料/{节目名称}_{播客标题}_{发布日期}/metadata.json`
+- Show Notes：`../资料/{节目名称}_{播客标题}_{发布日期}/Show Notes/shownotes.md`
 
 --- 转录稿结束 ---
 ```
 
-时间戳正文便于阅读和引用；机器处理仍以 `_segments.json` 为准。启用说话人分离后，
+时间戳正文便于阅读和引用；机器处理仍以资料包中的 `segments.json` 为准。启用说话人分离后，
 正文只展示匿名标签（例如 `SPEAKER_00`），不会自动猜测真实姓名。
 
 ---

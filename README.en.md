@@ -35,6 +35,7 @@ The scripts perform deterministic operations:
 6. Archive chapters, Show Notes, episode artwork, inline images, links, and an auditable media manifest.
 7. Persist resumable job state and produce an agent instruction for synthesis.
 8. Verify all artifacts after the agent writes the final report.
+9. Maintain one human-readable Markdown catalog with direct reading links and completion status.
 
 The final summary links to the independent transcript instead of embedding a
 second copy of the complete text.
@@ -109,6 +110,7 @@ python3 podcast-listener.py --resolve-only "EPISODE_URL"
 python3 podcast-listener.py --archive-only "EPISODE_URL"
 python3 podcast-listener.py --force-transcribe "EPISODE_URL"
 python3 podcast-listener.py --resume latest
+python3 podcast-listener.py --rebuild-index
 ```
 
 Full runs reuse a transcript only when the episode identity matches and the
@@ -166,10 +168,15 @@ verification.
 
 The top-level reading folders stay intentionally small: `转录稿/` contains
 only the readable transcript, while `总结稿/` contains the final report. All
-machine-readable files live in one per-episode package:
+machine-readable files live in one per-episode package. `播客索引.md` is the
+single human-facing catalog; it links each report, transcript, source page, and
+metadata package while showing whether an episode is complete or still needs a
+summary. It is updated automatically and can be rebuilt offline with
+`--rebuild-index`.
 
 ```text
 ~/Documents/播客总结/
+├── 播客索引.md
 ├── 转录稿/
 │   └── *_转录稿.txt
 ├── 总结稿/

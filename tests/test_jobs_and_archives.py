@@ -133,6 +133,48 @@ class JobTrackerTests(unittest.TestCase):
         self.assertEqual(result["job_status"], "completed")
 
 
+class HumanIndexTests(unittest.TestCase):
+    def test_rebuild_human_index_keeps_one_reading_entry_per_episode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            package_name = "Fixture_Show_Episode_20260828"
+            package = output / "资料" / package_name
+            transcript = output / "转录稿" / f"{package_name}_转录稿.txt"
+            report = output / "总结稿" / f"{package_name}_详细总结.md"
+            package.mkdir(parents=True)
+            transcript.parent.mkdir()
+            report.parent.mkdir()
+            (package / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "episode": {
+                            "show_title": "Fixture | Show",
+                            "title": "Readable Episode",
+                            "pub_date": "2026-08-28",
+                            "url": "https://example.com/episode",
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            transcript.write_text("# 播客转录稿\n", encoding="utf-8")
+
+            index_path = PODCAST.rebuild_human_index(output)
+            pending_index = index_path.read_text(encoding="utf-8")
+            report.write_text("# 详细总结\n", encoding="utf-8")
+            PODCAST.rebuild_human_index(output)
+            completed_index = index_path.read_text(encoding="utf-8")
+
+        self.assertIn("待总结", pending_index)
+        self.assertIn("Fixture \\| Show", pending_index)
+        self.assertIn("[转录稿]", pending_index)
+        self.assertNotIn("[总结稿]", pending_index)
+        self.assertIn("已完成", completed_index)
+        self.assertIn("[总结稿]", completed_index)
+        self.assertEqual(completed_index.count("Readable Episode"), 1)
+
+
 class ArchiveTests(unittest.TestCase):
     def test_coverless_checkpoint_is_rebuilt_when_episode_has_cover(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -22,6 +22,9 @@ The script first uses a publisher-provided Podcasting 2.0 transcript when one is
 Human-facing folders stay minimal: `转录稿/` contains only readable transcript
 text and `总结稿/` contains reports. Treat files under
 `资料/<show>_<episode>_<date>/` as the episode's machine-readable package.
+Use the automatically maintained `播客索引.md` as the human-facing catalog.
+It links each episode's report, transcript, source page, and metadata, and marks
+items as `待总结`, `已完成`, `仅归档`, or `资料不完整`.
 
 YouTube and Bilibili resolution must select an audio-only `yt-dlp` format. Do not fall back to a combined video format. Local course files may be audio or video; video input is converted with `ffmpeg -vn` so only its first audio track enters ASR. Process a multi-lesson course as one task per lesson so retries and reports remain independent. Intermediate audio is removed unless the user requests `--keep-audio`.
 
@@ -32,6 +35,7 @@ python3 "<skill-directory>/podcast-listener.py" --resolve-only "EPISODE_INPUT"
 python3 "<skill-directory>/podcast-listener.py" --archive-only "EPISODE_INPUT"
 python3 "<skill-directory>/podcast-listener.py" --force-transcribe "EPISODE_INPUT"
 python3 "<skill-directory>/podcast-listener.py" --resume latest
+python3 "<skill-directory>/podcast-listener.py" --rebuild-index
 ```
 
 Full runs reuse a matching existing transcript by default.

@@ -40,6 +40,7 @@ from version import __version__
 
 
 DEFAULT_OUTPUT_DIR = Path.home() / "Documents" / "播客总结"
+HUMAN_INDEX_FILENAME = "播客索引.md"
 DEFAULT_MODEL = "large-v3"
 FALLBACK_MODELS = ["large-v3", "small", "base"]
 ITUNES_LOOKUP_URL = "https://itunes.apple.com/lookup"
@@ -3853,6 +3854,102 @@ def atomic_write_text(path: Path, content: str) -> None:
     os.replace(temp_path, path)
 
 
+def escape_markdown_table_cell(value: Any) -> str:
+    return str(value or "未获取").replace("|", "\\|").replace("\r", " ").replace("\n", " ").strip()
+
+
+def format_index_date(value: Any) -> str:
+    digits = re.sub(r"[^0-9]", "", str(value or ""))[:8]
+    if len(digits) == 8:
+        return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
+    return escape_markdown_table_cell(value)
+
+
+def human_index_status(transcript_path: Path, report_path: Path, mode: str) -> str:
+    transcript_exists = transcript_path.is_file()
+    report_exists = report_path.is_file()
+    if transcript_exists and report_exists:
+        return "已完成"
+    if transcript_exists:
+        return "待总结"
+    if mode == "archive-only":
+        return "仅归档"
+    return "资料不完整"
+
+
+def rebuild_human_index(output_dir: Path) -> Path:
+    """Build the single human-facing catalog from per-episode metadata packages."""
+    output_dir = output_dir.expanduser()
+    package_root = output_dir / "资料"
+    rows: list[dict[str, str]] = []
+    for metadata_path in package_root.glob("*/metadata.json") if package_root.is_dir() else []:
+        try:
+            payload = read_json_object(metadata_path)
+        except (OSError, json.JSONDecodeError, ValueError):
+            continue
+        episode = payload.get("episode") or {}
+        if not isinstance(episode, dict):
+            continue
+        package_name = metadata_path.parent.name
+        transcript_path = output_dir / "转录稿" / f"{package_name}_转录稿.txt"
+        report_path = output_dir / "总结稿" / f"{package_name}_详细总结.md"
+        mode = str(payload.get("mode") or "transcribe")
+        rows.append(
+            {
+                "sort_date": re.sub(r"[^0-9]", "", str(episode.get("pub_date") or ""))[:8],
+                "date": format_index_date(episode.get("pub_date")),
+                "show": escape_markdown_table_cell(episode.get("show_title") or "未知节目"),
+                "title": escape_markdown_table_cell(episode.get("title") or package_name),
+                "status": human_index_status(transcript_path, report_path, mode),
+                "url": str(episode.get("url") or "").strip(),
+                "transcript": relative_output_path(transcript_path, output_dir)
+                if transcript_path.is_file()
+                else "",
+                "report": relative_output_path(report_path, output_dir)
+                if report_path.is_file()
+                else "",
+                "metadata": relative_output_path(metadata_path, output_dir),
+            }
+        )
+
+    rows.sort(
+        key=lambda row: (row["sort_date"], row["show"], row["title"]),
+        reverse=True,
+    )
+    completed = sum(row["status"] == "已完成" for row in rows)
+    pending = sum(row["status"] == "待总结" for row in rows)
+    archived = sum(row["status"] == "仅归档" for row in rows)
+    incomplete = sum(row["status"] == "资料不完整" for row in rows)
+    lines = [
+        "# 播客资料索引",
+        "",
+        "> 这是自动生成的人类阅读入口。可直接打开总结稿或转录稿；字幕、图片、Show Notes 和机器数据统一收在每期资料包中。",
+        "",
+        f"共 {len(rows)} 期：已完成 {completed}，待总结 {pending}，仅归档 {archived}，资料不完整 {incomplete}。",
+        "",
+        "| 日期 | 节目 | 单集 | 状态 | 阅读与资料 |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for row in rows:
+        links: list[str] = []
+        if row["report"]:
+            links.append(f"[总结稿](<{row['report']}>)")
+        if row["transcript"]:
+            links.append(f"[转录稿](<{row['transcript']}>)")
+        links.append(f"[资料](<{row['metadata']}>)")
+        if row["url"]:
+            links.append(f"[原始页面]({row['url']})")
+        lines.append(
+            f"| {row['date']} | {row['show']} | {row['title']} | {row['status']} | {' · '.join(links)} |"
+        )
+    if not rows:
+        lines.append("| - | - | 暂无资料 | - | - |")
+
+    index_path = output_dir / HUMAN_INDEX_FILENAME
+    atomic_write_text(index_path, "\n".join(lines) + "\n")
+    return index_path
+
+
 def read_json_object(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -4277,6 +4374,8 @@ def run_verify(output_dir: Path, target: str, *, require_report: bool) -> int:
     if verification["ok"] and verification["report_present"] and job_path and job_path.is_file():
         tracker = JobTracker(job_path.parent, read_json_object(job_path), resumed=True)
         tracker.mark_report_complete()
+    if verification["ok"]:
+        verification["index_path"] = str(rebuild_human_index(output_dir))
     print(json.dumps(verification, ensure_ascii=False, indent=2))
     return 0 if verification["ok"] else 1
 
@@ -4301,6 +4400,11 @@ def parse_cli_args() -> argparse.Namespace:
         "--archive-only",
         action="store_true",
         help="只解析和归档 Show Notes，不下载音频或转录",
+    )
+    mode.add_argument(
+        "--rebuild-index",
+        action="store_true",
+        help="根据现有资料包重建根目录的播客索引，不解析或转录",
     )
     parser.add_argument(
         "--force-transcribe",
@@ -4359,8 +4463,8 @@ def parse_cli_args() -> argparse.Namespace:
         help="核验时要求正式总结稿已经生成",
     )
     args = parser.parse_args()
-    if not args.input and not args.resume and not args.verify:
-        parser.error("请提供播客输入，或使用 --resume / --verify")
+    if not args.input and not args.resume and not args.verify and not args.rebuild_index:
+        parser.error("请提供播客输入，或使用 --resume / --verify / --rebuild-index")
     if args.verify and (args.input or args.resume):
         parser.error("--verify 不能与播客输入或 --resume 同时使用")
     if args.verify and args.archive_only:
@@ -4371,6 +4475,8 @@ def parse_cli_args() -> argparse.Namespace:
         parser.error("--resume 不能与 --job-id 同时使用")
     if args.resolve_only and (args.resume or args.verify):
         parser.error("--resolve-only 不能与 --resume / --verify 同时使用")
+    if args.rebuild_index and (args.input or args.resume or args.verify):
+        parser.error("--rebuild-index 不能与播客输入、--resume 或 --verify 同时使用")
     if args.require_report and not args.verify:
         parser.error("--require-report 只能与 --verify 同时使用")
     return args
@@ -4528,6 +4634,10 @@ def main() -> None:
         getattr(args, "output_dir", None)
         or os.environ.get("OUTPUT_DIR", str(DEFAULT_OUTPUT_DIR))
     ).expanduser()
+    if getattr(args, "rebuild_index", False):
+        index_path = rebuild_human_index(output_dir)
+        emit_result({"mode": "rebuild-index", "index_path": str(index_path)}, print_json=True)
+        return
     if getattr(args, "verify", None):
         raise SystemExit(
             run_verify(
@@ -4725,6 +4835,7 @@ def main() -> None:
                 chapters_archive.get("path") if chapters_archive and chapters_archive.get("ok") else None
             ),
         }
+        payload["index_path"] = str(rebuild_human_index(output_dir))
         if tracker:
             payload = tracker.finish(payload, awaiting_report=False)
         emit_result(payload, print_json=True)
@@ -4937,6 +5048,7 @@ def main() -> None:
                 else None
             ),
         }
+        result_payload["index_path"] = str(rebuild_human_index(output_dir))
         if tracker:
             result_payload = tracker.finish(result_payload, awaiting_report=True)
         emit_result(result_payload)

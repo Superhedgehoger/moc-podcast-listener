@@ -2,7 +2,7 @@
 
 **简体中文** | [English](README.en.md) | [多语言首页](README.md)
 
-> 版本：v4.9.0
+> 版本：v4.10.0
 > 核心流程：输入单集或课时 → 安全解析/仅提取音轨 → 发布方转录或本地 ASR → 来源归档 → Agent 总结 → 产物核验
 
 很多播客值得反复查阅，但音频不方便搜索，Show Notes 中的图片和链接也可能失效。
@@ -16,7 +16,9 @@
 整篇转录正文。这样既减少重复文件，也让原始材料与观点整理保持清晰边界。
 
 输出目录以人类阅读为先：`转录稿/` 只放可直接阅读的 `.txt`，`总结稿/` 只放
-最终总结；字幕、JSON、图片和任务状态统一收进每期 `资料/` 包。
+最终总结；字幕、JSON、图片和任务状态统一收进每期 `资料/` 包。根目录的
+`播客索引.md` 是统一阅读入口，按日期列出节目、单集和处理状态，并直接链接总结稿、
+转录稿、资料包和原始页面。
 
 
 ---
@@ -83,6 +85,7 @@ python3 podcast-listener.py --resolve-only "单集链接"
 python3 podcast-listener.py --archive-only "单集链接"
 python3 podcast-listener.py --force-transcribe "单集链接"
 python3 podcast-listener.py --resume latest
+python3 podcast-listener.py --rebuild-index
 python3 podcast-listener.py --archive-only \
   --sync-backend local --sync-destination "$HOME/Nutstore Files/播客归档" "单集链接"
 ```
@@ -100,10 +103,14 @@ python3 podcast-listener.py --output-dir "$HOME/Documents/播客总结" \
   --verify "JOB_ID" --require-report
 ```
 
+每次归档、转录或核验都会自动更新 `播客索引.md`。手动移动或补齐历史文件后，可运行
+`--rebuild-index` 根据 `资料/` 中的元数据重新生成索引；它不会联网，也不会重新转录。
+
 处理完成后输出目录结构如下（`总结稿/` 中的最终报告由 Agent 后续写入）：
 
 ```text
 ~/Documents/播客总结/
+├── 播客索引.md
 ├── .jobs/{job-id}/
 │   ├── job.json
 │   ├── status.json

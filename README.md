@@ -60,6 +60,7 @@ the agent performs evidence-backed synthesis.
   coverage.
 - Persists resumable jobs and verifies the final report before completion.
 - Keeps transcripts separate from summaries to avoid duplicated artifacts.
+- Maintains one Markdown catalog for human browsing and unfinished-work tracking.
 
 See [README.en.md](README.en.md) for the complete English guide.
 
@@ -91,6 +92,7 @@ Resolve or archive without transcription:
 ```bash
 python3 podcast-listener.py --resolve-only "EPISODE_URL"
 python3 podcast-listener.py --archive-only "EPISODE_URL"
+python3 podcast-listener.py --rebuild-index
 ```
 
 ## Install as a Skill / 安装为 Skill
@@ -114,6 +116,7 @@ downloaded audio, generated transcripts, or storage credentials.
 
 ```text
 ~/Documents/播客总结/
+├── 播客索引.md
 ├── .jobs/{job-id}/
 │   ├── status.json
 │   └── result.json

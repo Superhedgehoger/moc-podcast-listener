@@ -24,7 +24,9 @@ text and `总结稿/` contains reports. Treat files under
 `资料/<show>_<episode>_<date>/` as the episode's machine-readable package.
 Use the automatically maintained `播客索引.md` as the human-facing catalog.
 It links each episode's report, transcript, source page, and metadata, and marks
-items as `待总结`, `已完成`, `仅归档`, or `资料不完整`.
+items as `待总结`, `已完成`, `仅归档`, or `资料不完整`. Completed items are
+ordered by report verification time; pending items are ordered by transcription
+time. Do not use the episode publication date as the catalog sort key.
 
 YouTube and Bilibili resolution must select an audio-only `yt-dlp` format. Do not fall back to a combined video format. Local course files may be audio or video; video input is converted with `ffmpeg -vn` so only its first audio track enters ASR. Process a multi-lesson course as one task per lesson so retries and reports remain independent. Intermediate audio is removed unless the user requests `--keep-audio`.
 

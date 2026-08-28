@@ -60,7 +60,7 @@ the agent performs evidence-backed synthesis.
   coverage.
 - Persists resumable jobs and verifies the final report before completion.
 - Keeps transcripts separate from summaries to avoid duplicated artifacts.
-- Maintains one Markdown catalog for human browsing and unfinished-work tracking.
+- Maintains one Markdown catalog ordered by report completion time for human browsing and unfinished-work tracking.
 
 See [README.en.md](README.en.md) for the complete English guide.
 

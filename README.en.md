@@ -171,7 +171,8 @@ only the readable transcript, while `总结稿/` contains the final report. All
 machine-readable files live in one per-episode package. `播客索引.md` is the
 single human-facing catalog; it links each report, transcript, source page, and
 metadata package while showing whether an episode is complete or still needs a
-summary. It is updated automatically and can be rebuilt offline with
+summary. Completed items are ordered by report completion time rather than the
+episode publication date. It is updated automatically and can be rebuilt offline with
 `--rebuild-index`.
 
 ```text

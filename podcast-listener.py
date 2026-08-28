@@ -29,6 +29,7 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -3858,11 +3859,37 @@ def escape_markdown_table_cell(value: Any) -> str:
     return str(value or "未获取").replace("|", "\\|").replace("\r", " ").replace("\n", " ").strip()
 
 
-def format_index_date(value: Any) -> str:
-    digits = re.sub(r"[^0-9]", "", str(value or ""))[:8]
-    if len(digits) == 8:
-        return f"{digits[:4]}-{digits[4:6]}-{digits[6:8]}"
-    return escape_markdown_table_cell(value)
+def parse_index_timestamp(value: Any) -> float:
+    raw = str(value or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def format_index_timestamp(timestamp: float) -> str:
+    if timestamp <= 0:
+        return "-"
+    return datetime.fromtimestamp(timestamp).astimezone().strftime("%Y-%m-%d %H:%M")
+
+
+def report_completion_times(output_dir: Path) -> dict[str, float]:
+    completed: dict[str, float] = {}
+    jobs_dir = output_dir / ".jobs"
+    for result_path in jobs_dir.glob("*/result.json") if jobs_dir.is_dir() else []:
+        try:
+            result = read_json_object(result_path)
+        except (OSError, json.JSONDecodeError, ValueError):
+            continue
+        report_path = result.get("report_path")
+        timestamp = parse_index_timestamp(result.get("report_verified_at"))
+        if not report_path or timestamp <= 0:
+            continue
+        key = str(Path(str(report_path)).expanduser().resolve())
+        completed[key] = max(timestamp, completed.get(key, 0.0))
+    return completed
 
 
 def human_index_status(transcript_path: Path, report_path: Path, mode: str) -> str:
@@ -3881,6 +3908,7 @@ def rebuild_human_index(output_dir: Path) -> Path:
     """Build the single human-facing catalog from per-episode metadata packages."""
     output_dir = output_dir.expanduser()
     package_root = output_dir / "资料"
+    completion_times = report_completion_times(output_dir)
     rows: list[dict[str, str]] = []
     for metadata_path in package_root.glob("*/metadata.json") if package_root.is_dir() else []:
         try:
@@ -3894,10 +3922,21 @@ def rebuild_human_index(output_dir: Path) -> Path:
         transcript_path = output_dir / "转录稿" / f"{package_name}_转录稿.txt"
         report_path = output_dir / "总结稿" / f"{package_name}_详细总结.md"
         mode = str(payload.get("mode") or "transcribe")
+        transcription = payload.get("transcription") or {}
+        transcript_time = parse_index_timestamp(
+            transcription.get("processed_at") if isinstance(transcription, dict) else None
+        )
+        if transcript_time <= 0 and transcript_path.is_file():
+            transcript_time = transcript_path.stat().st_mtime
+        report_time = completion_times.get(str(report_path.resolve()), 0.0)
+        if report_time <= 0 and report_path.is_file():
+            report_time = report_path.stat().st_mtime
         rows.append(
             {
-                "sort_date": re.sub(r"[^0-9]", "", str(episode.get("pub_date") or ""))[:8],
-                "date": format_index_date(episode.get("pub_date")),
+                "sort_group": "1" if report_time > 0 else "0",
+                "sort_time": str(report_time or transcript_time or metadata_path.stat().st_mtime),
+                "report_date": format_index_timestamp(report_time),
+                "transcript_date": format_index_timestamp(transcript_time),
                 "show": escape_markdown_table_cell(episode.get("show_title") or "未知节目"),
                 "title": escape_markdown_table_cell(episode.get("title") or package_name),
                 "status": human_index_status(transcript_path, report_path, mode),
@@ -3913,7 +3952,12 @@ def rebuild_human_index(output_dir: Path) -> Path:
         )
 
     rows.sort(
-        key=lambda row: (row["sort_date"], row["show"], row["title"]),
+        key=lambda row: (
+            int(row["sort_group"]),
+            float(row["sort_time"]),
+            row["show"],
+            row["title"],
+        ),
         reverse=True,
     )
     completed = sum(row["status"] == "已完成" for row in rows)
@@ -3927,8 +3971,8 @@ def rebuild_human_index(output_dir: Path) -> Path:
         "",
         f"共 {len(rows)} 期：已完成 {completed}，待总结 {pending}，仅归档 {archived}，资料不完整 {incomplete}。",
         "",
-        "| 日期 | 节目 | 单集 | 状态 | 阅读与资料 |",
-        "| --- | --- | --- | --- | --- |",
+        "| 总结日期 | 转录日期 | 节目 | 单集 | 状态 | 阅读与资料 |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
     for row in rows:
         links: list[str] = []
@@ -3940,10 +3984,10 @@ def rebuild_human_index(output_dir: Path) -> Path:
         if row["url"]:
             links.append(f"[原始页面]({row['url']})")
         lines.append(
-            f"| {row['date']} | {row['show']} | {row['title']} | {row['status']} | {' · '.join(links)} |"
+            f"| {row['report_date']} | {row['transcript_date']} | {row['show']} | {row['title']} | {row['status']} | {' · '.join(links)} |"
         )
     if not rows:
-        lines.append("| - | - | 暂无资料 | - | - |")
+        lines.append("| - | - | - | 暂无资料 | - | - |")
 
     index_path = output_dir / HUMAN_INDEX_FILENAME
     atomic_write_text(index_path, "\n".join(lines) + "\n")

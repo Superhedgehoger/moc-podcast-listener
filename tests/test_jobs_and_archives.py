@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import tempfile
 import types
@@ -172,7 +173,45 @@ class HumanIndexTests(unittest.TestCase):
         self.assertNotIn("[总结稿]", pending_index)
         self.assertIn("已完成", completed_index)
         self.assertIn("[总结稿]", completed_index)
+        self.assertIn("| 总结日期 | 转录日期 |", completed_index)
         self.assertEqual(completed_index.count("Readable Episode"), 1)
+
+    def test_rebuild_human_index_sorts_by_report_completion_not_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            for name, published, report_time in (
+                ("Older_Publication_New_Summary_20200101", "2020-01-01", 2_000_000_000),
+                ("Newer_Publication_Old_Summary_20260101", "2026-01-01", 1_000_000_000),
+            ):
+                package = output / "资料" / name
+                transcript = output / "转录稿" / f"{name}_转录稿.txt"
+                report = output / "总结稿" / f"{name}_详细总结.md"
+                package.mkdir(parents=True)
+                transcript.parent.mkdir(exist_ok=True)
+                report.parent.mkdir(exist_ok=True)
+                (package / "metadata.json").write_text(
+                    json.dumps(
+                        {
+                            "episode": {
+                                "show_title": "Fixture",
+                                "title": name,
+                                "pub_date": published,
+                            },
+                            "transcription": {"processed_at": "2026-08-01 12:00:00"},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                transcript.write_text("transcript", encoding="utf-8")
+                report.write_text("report", encoding="utf-8")
+                os.utime(report, (report_time, report_time))
+
+            index = PODCAST.rebuild_human_index(output).read_text(encoding="utf-8")
+
+        self.assertLess(
+            index.index("Older_Publication_New_Summary"),
+            index.index("Newer_Publication_Old_Summary"),
+        )
 
 
 class ArchiveTests(unittest.TestCase):

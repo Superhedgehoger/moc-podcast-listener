@@ -4,7 +4,7 @@
 
 ## Overview
 
-> Version: v4.15.0
+> Version: v4.15.1
 
 MOC Podcast Listener is a practical, local-first skill for turning podcast
 episodes and course lessons into durable research material. It resolves media, prefers an
@@ -123,6 +123,18 @@ python3 podcast-listener.py --rebuild-knowledge-index
 Full runs reuse a transcript only when the episode identity matches and the
 content passes completeness checks.
 
+Backfill older reports and Show Notes packages with a preview-first workflow:
+
+```bash
+python3 scripts/backfill_summary_dates.py "$HOME/Documents/播客总结"
+python3 scripts/backfill_summary_dates.py "$HOME/Documents/播客总结" --apply
+python3 scripts/backfill_shownotes_links.py "$HOME/Documents/播客总结"
+python3 scripts/backfill_shownotes_links.py "$HOME/Documents/播客总结" --apply
+```
+
+Both apply commands create backups under `.backup/` before changing existing
+files and preserve their original modification times.
+
 Every non-resolve run creates `.jobs/<job-id>/job.json`, `status.json`, and
 `result.json`. A full run stops at `awaiting_report` after transcription. Once
 the agent has written `report_path`, verify the package and mark it complete:
@@ -139,6 +151,12 @@ may regenerate AI topics and tags in the JSON file, but it must never overwrite
 the personal notes file. A new job reaches `completed` only when the report has
 a `关键洞察与证据` section and direct quotations pass transcript and timestamp
 verification.
+
+The report title is followed by a `转录总结日期` line recording the local date
+on which transcript-based synthesis was completed. Show Notes keep a compact
+human-readable link archive inside the existing `shownotes.md`; every original
+online URL is also retained in the media manifest. Full page snapshots remain
+optional so routine archiving stays inexpensive.
 
 ```bash
 python3 podcast-listener.py --rebuild-knowledge-index

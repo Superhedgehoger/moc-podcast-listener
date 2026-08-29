@@ -162,7 +162,10 @@ class JobTrackerTests(unittest.TestCase):
             metadata.write_text(
                 '{"episode": {"duration_minutes": 1}}', encoding="utf-8"
             )
-            report.write_text("# 总结\n\n## 关键洞察与证据\n", encoding="utf-8")
+            report.write_text(
+                "# 总结\n\n> 转录总结日期：2026-08-29\n\n## 关键洞察与证据\n",
+                encoding="utf-8",
+            )
             base_result = {
                 "mode": "transcribe",
                 "transcript_path": str(transcript),

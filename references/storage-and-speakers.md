@@ -76,7 +76,9 @@ Set `SHOWNOTES_SYNC_REQUIRED=1` or pass `--sync-required` when an automation sho
 
 ## Optional Link Snapshots
 
-Show Notes hyperlinks remain online URLs by default. This is the lowest-cost
+Show Notes hyperlinks remain online URLs by default. Every URL is written to
+both the human-readable `链接归档` section in `shownotes.md` and the machine-readable
+manifest. This is the lowest-cost
 choice and avoids unexpectedly archiving entire websites. When a linked page
 is important enough to preserve, install one of these tools and opt in:
 

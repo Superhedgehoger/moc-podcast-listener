@@ -48,6 +48,8 @@ quotation, timestamp, artifact-link, and verification requirements.
 ```markdown
 # 播客代听报告 / 课程转录总结
 
+> 转录总结日期：YYYY-MM-DD
+
 ## 基本信息
 
 | 字段 | 内容 |
@@ -87,6 +89,9 @@ Insert the complete archived Show Notes Markdown. Preserve its text and online
 links, but rebase local relative image or snapshot paths from the archived
 `shownotes.md` directory to the final report directory. Do not copy a path
 verbatim when that would make the report link resolve to a different file.
+Keep the managed `链接归档` section intact: every link must retain its original
+online URL, and a local snapshot link may be added only when the manifest marks
+that snapshot complete.
 
 ## 转录稿
 
@@ -105,7 +110,9 @@ Example:
 - [章节数据](<../资料/{节目名称}_{播客标题}_{发布日期}/转录数据/chapters.json>)（存在时）
 ```
 
-Before finalizing, complete `knowledge.json` according to
+Use the local calendar date on which the transcript-based report was completed,
+not the episode publication date. Place `转录总结日期` immediately after the
+top-level title. Before finalizing, complete `knowledge.json` according to
 `references/knowledge-workflow.md`, leave `我的笔记.md` untouched, verify all
 quotations, rebase and preserve image-relative paths, list
 failed media downloads from the manifest, and confirm every transcript link

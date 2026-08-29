@@ -145,7 +145,7 @@ class PlatformParsingTests(unittest.TestCase):
             "url": "https://episode.example/item",
             "title": "Episode",
             "show_title": "Show",
-            "show_notes": "官网 https://example.com/site\n[文章](https://example.com/article)",
+            "show_notes": "官网 https://example.com/site），后续文字；\n[文章](https://example.com/article)",
         }
         with tempfile.TemporaryDirectory() as tmp, patch.dict(
             MODULE.os.environ, {"SHOWNOTES_ASSETS": "online"}
@@ -157,9 +157,15 @@ class PlatformParsingTests(unittest.TestCase):
             self.assertEqual(Path(archived["markdown_path"]), archive_dir / "shownotes.md")
             self.assertEqual(Path(archived["raw_html_path"]), archive_dir / "source.raw.html")
             self.assertEqual(Path(archived["manifest_path"]), archive_dir / "media-manifest.json")
+            shownotes = Path(archived["markdown_path"]).read_text(encoding="utf-8")
         urls = {item["url"] for item in manifest["links"]}
         self.assertIn("https://example.com/site", urls)
         self.assertIn("https://example.com/article", urls)
+        self.assertNotIn("https://example.com/site），后续文字；", urls)
+        self.assertIn("## 链接归档", shownotes)
+        self.assertNotIn("[example.com/site），后续文字", shownotes)
+        self.assertIn("保存：在线 URL", shownotes)
+        self.assertTrue(all(item["preservation"] == "online_url" for item in manifest["links"]))
 
     def test_online_image_manifest_keeps_auditable_source_metadata(self) -> None:
         info = {

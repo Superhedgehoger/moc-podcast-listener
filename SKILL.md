@@ -78,10 +78,12 @@ Read [references/report-workflow.md](references/report-workflow.md) and [referen
 - Never infer a real speaker name from an unlabelled transcript or an anonymous `SPEAKER_00` label. Use `说话人未确认` when identity is not supported.
 - Attach timestamps to quotations whenever segment data is available.
 - Preserve the archived Show Notes content and online links in the final report. Rebase only local relative asset paths from the Show Notes file location to the report location so archived images remain valid in both files.
+- Keep every Show Notes hyperlink in the managed `链接归档` section of `shownotes.md` and in `media-manifest.json`. Preserve the original online URL even when a local snapshot succeeds or fails; do not imply that an online URL alone is a saved webpage.
 - Keep the transcript as a separate source document. In the report, describe it and link the transcript, segments JSON, SRT, WebVTT, and archived chapter JSON when present, using paths relative to the report; never embed the complete transcript.
 - Name artifacts from the podcast show, episode title, and publication date. Do not add distribution platform names such as Overcast or 小宇宙 to filenames.
 - Do not claim that a URL or image was archived unless its manifest entry reports success.
 - Complete the episode package's `knowledge.json` together with the report. Every core insight needs evidence and direct quotations must match transcript text and timestamp segments.
+- Put `> 转录总结日期：YYYY-MM-DD` immediately after the report title, using the local date when the transcript-based summary is completed, not the episode publication date.
 - Never overwrite `我的笔记.md`. AI topics/tags belong in `knowledge.json`; user comments and user tags belong only in the personal notes file.
 
 ## Knowledge Library
@@ -103,9 +105,9 @@ Before returning:
 
 1. Confirm the report file exists at `report_path` from `result.json`.
 2. Confirm required sections from the report workflow are present.
-3. Confirm the report contains `关键洞察与证据`, complete `knowledge.json`, and check quotations against transcript text and timestamp segments.
+3. Confirm the report begins with a valid `转录总结日期`, contains `关键洞察与证据`, completes `knowledge.json`, and check quotations against transcript text and timestamp segments.
 4. Count summary body characters without Show Notes.
-5. Confirm the report's transcript, segments, SRT, WebVTT, and optional chapter links resolve.
+5. Confirm the report's transcript, segments, SRT, WebVTT, optional chapter links, and every Show Notes online link are preserved.
 6. Report any unavailable images, links, speaker identities, or transcription gaps explicitly.
 7. Run the verification command written in `_Agent任务指令.txt`, normally:
 

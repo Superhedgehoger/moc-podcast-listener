@@ -43,6 +43,13 @@ from knowledge_base import (
     rebuild_knowledge_index,
     validate_knowledge,
 )
+from shownotes_links import (
+    LINK_ARCHIVE_START,
+    canonicalize_links,
+    extract_plain_urls,
+    render_link_archive,
+    update_link_archive,
+)
 from version import __version__
 
 
@@ -1438,26 +1445,38 @@ def archive_show_notes(info: dict[str, Any], output_dir: Path, combined_name: st
         markdown = f"[原始单集链接]({markdown_escape_url(source_url)})\n\n{markdown}".strip()
 
     atomic_write_text(html_path, raw_show_notes)
-    atomic_write_text(markdown_path, markdown + "\n")
 
     image_urls = {item["source_url"] for item in images if item.get("source_url")}
     links = list(parser.links)
     seen_links = {item["url"] for item in links}
-    for candidate in re.findall(r"https?://[^\s<>'\"\])]+", raw_show_notes):
+    for candidate in extract_plain_urls(raw_show_notes):
         normalized = normalize_shownotes_url(candidate, info.get("url") or "")
         if normalized and normalized not in image_urls and normalized not in seen_links:
             links.append({"text": normalized, "url": normalized})
             seen_links.add(normalized)
 
-    for link in links:
-        link["source_url"] = link.get("source_url") or link.get("url")
-        link["normalized_url"] = link.get("url")
+    archive_created_at = iso_timestamp()
+    links = canonicalize_links(
+        links,
+        base_url=info.get("url") or "",
+        saved_at=archive_created_at,
+    )
     snapshot_mode = os.environ.get("SHOWNOTES_LINK_SNAPSHOT", "none").lower().strip()
     snapshot_summary = snapshot_shownotes_links(
         links,
         shownotes_dir,
         snapshot_mode,
     )
+    links = canonicalize_links(
+        links,
+        base_url=info.get("url") or "",
+        saved_at=archive_created_at,
+    )
+    markdown = update_link_archive(
+        markdown,
+        render_link_archive(links, shownotes_dir),
+    )
+    atomic_write_text(markdown_path, markdown)
 
     manifest = {
         "schema_version": 2,
@@ -1473,7 +1492,7 @@ def archive_show_notes(info: dict[str, Any], output_dir: Path, combined_name: st
         "images": images,
         "links": links,
         "link_snapshots": snapshot_summary,
-        "created_at": iso_timestamp(),
+        "created_at": archive_created_at,
     }
     atomic_write_text(
         manifest_path,
@@ -3653,6 +3672,7 @@ def build_agent_instruction(
 7. 仅对 60 分钟以上、高风险主题或用户明确要求的深度版执行独立质检。
 8. 提交前确认：
    - [ ] 包含「📋 基本信息」表格，所有字段已填写
+   - [ ] 标题后写有「转录总结日期：YYYY-MM-DD」，使用完成总结的本地日期而非节目发布日期
    - [ ] 核心观点包含具体证据、案例、数字或机制
    - [ ] 引述已核对原文，且未猜测说话人
    - [ ] 包含背景与术语、实用资源、延伸思考与局限
@@ -4364,6 +4384,7 @@ def verify_result_artifacts(
             warnings.extend(knowledge_verification.get("warnings") or [])
 
     archive = result.get("shownotes_archive") or {}
+    shownotes_online_urls: list[str] = []
     if archive:
         markdown_path = check_file("shownotes_markdown", archive.get("markdown_path"))
         check_file("shownotes_raw_html", archive.get("raw_html_path"))
@@ -4371,6 +4392,11 @@ def verify_result_artifacts(
         if manifest_path:
             try:
                 manifest = read_json_object(manifest_path)
+                shownotes_online_urls = [
+                    str(link.get("url"))
+                    for link in manifest.get("links") or []
+                    if isinstance(link, dict) and link.get("url")
+                ]
                 expected_cover = normalize_shownotes_url(
                     (metadata_payload.get("episode") or {}).get("cover_url")
                 )
@@ -4402,6 +4428,12 @@ def verify_result_artifacts(
                 errors.append(f"Show Notes manifest is invalid: {manifest_path}: {exc}")
         if markdown_path:
             markdown = markdown_path.read_text(encoding="utf-8")
+            if shownotes_online_urls and LINK_ARCHIVE_START not in markdown:
+                errors.append("Show Notes is missing the human-readable link archive")
+            for online_url in shownotes_online_urls:
+                escaped_url = markdown_escape_url(online_url)
+                if online_url not in markdown and escaped_url not in markdown:
+                    errors.append(f"Show Notes online link is missing: {online_url}")
             for raw_link in re.findall(r"!\[[^\]]*\]\((?:<)?([^)>]+)(?:>)?\)", markdown):
                 if urlparse(raw_link).scheme in {"http", "https"}:
                     continue
@@ -4434,8 +4466,18 @@ def verify_result_artifacts(
                 warnings.append(message)
         else:
             report = report_path.read_text(encoding="utf-8")
+            if require_report and raw_knowledge_path and not re.search(
+                r"(?m)^>\s*转录总结日期[：:]\s*\d{4}-\d{2}-\d{2}\s*$",
+                report[:2000],
+            ):
+                errors.append("report is missing transcript summary date")
             if require_report and raw_knowledge_path and "关键洞察与证据" not in report:
                 errors.append("report is missing section: 关键洞察与证据")
+            if require_report:
+                for online_url in shownotes_online_urls:
+                    escaped_url = markdown_escape_url(online_url)
+                    if online_url not in report and escaped_url not in report:
+                        errors.append(f"report is missing Show Notes link: {online_url}")
             for raw_link in re.findall(r"\[[^\]]+\]\((?:<)?([^)>]+)(?:>)?\)", report):
                 parsed = urlparse(raw_link)
                 if parsed.scheme or raw_link.startswith("#"):

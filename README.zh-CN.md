@@ -2,7 +2,7 @@
 
 **简体中文** | [English](README.en.md) | [多语言首页](README.md)
 
-> 版本：v4.15.0
+> 版本：v4.15.1
 > 核心流程：输入单集或课时 → 优先复用转录/仅提取音轨 → 来源归档 → 证据化总结 → 个人笔记 → 检索与导出
 
 很多播客值得反复查阅，但音频不方便搜索，Show Notes 中的图片和链接也可能失效。
@@ -36,6 +36,8 @@
 | `podcast-export.py` | 导出 Obsidian、Notion、Zotero、NotebookLM 和 MCP 文件 |
 | `knowledge_base.py` | 证据校验、个人笔记模板、知识索引和搜索核心 |
 | `subscription_manager.py` | RSS 订阅去重、评分和低成本 Brief |
+| `scripts/backfill_summary_dates.py` | 为历史总结补录转录总结日期，默认预览、写入前备份 |
+| `scripts/backfill_shownotes_links.py` | 为历史 Show Notes 清洗并补齐人类可读链接归档 |
 | `listen-and-summarize.sh` | 一键转录入口，结束后打印 Agent 后续任务指令 |
 | `chunk_transcript.py` | 超长转录稿分块工具，用于逐块证据提取 |
 | `quick-listen.py` | 快速入口，复用主流程并默认使用 Whisper small |
@@ -189,6 +191,16 @@ python3 podcast-listener.py --export obsidian --export-dir "$HOME/Obsidian/Podca
 新作业的总结完成条件更严格：Agent 还必须同步完成 `knowledge.json`，每条核心洞察至少
 提供一条引述或转述证据；直接引述需要同时匹配转录稿正文和对应时间戳 segments。报告中
 必须保留「关键洞察与证据」章节。`--verify --require-report` 全部通过后，作业才是完成状态。
+
+总结稿标题下一行还会记录 `转录总结日期`。该日期表示基于转录稿完成总结的本地日期，
+不是节目发布日期。历史总结和 Show Notes 链接可以先预览、再备份写入：
+
+```bash
+python3 scripts/backfill_summary_dates.py "$HOME/Documents/播客总结"
+python3 scripts/backfill_summary_dates.py "$HOME/Documents/播客总结" --apply
+python3 scripts/backfill_shownotes_links.py "$HOME/Documents/播客总结"
+python3 scripts/backfill_shownotes_links.py "$HOME/Documents/播客总结" --apply
+```
 
 旧版本生成的平铺目录可先预览、再迁移。正式迁移默认会把受影响文件备份到
 `.backup/`，并同步修正转录稿、总结稿、Manifest 与作业状态中的本地路径：

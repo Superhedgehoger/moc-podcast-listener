@@ -63,6 +63,8 @@ the agent performs evidence-backed synthesis.
 - Keeps transcripts separate from summaries to avoid duplicated artifacts.
 - Maintains one Markdown catalog ordered by report completion time for human browsing and unfinished-work tracking.
 - Stores evidence-backed insights in `knowledge.json` and preserves user-owned `我的笔记.md`.
+- Records the transcript-summary completion date at the top of each report.
+- Preserves every Show Notes URL in the existing Markdown file and manifest, with optional local snapshots.
 - Scans RSS subscriptions into a low-cost daily Brief without automatically running ASR.
 - Exports rebuildable Obsidian, Notion, Zotero, NotebookLM, and MCP-friendly files.
 

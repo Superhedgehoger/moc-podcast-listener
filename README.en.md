@@ -4,11 +4,15 @@
 
 ## Overview
 
+> Version: v4.15.0
+
 MOC Podcast Listener is a practical, local-first skill for turning podcast
 episodes and course lessons into durable research material. It resolves media, prefers an
 official publisher transcript when available, falls back to local speech
 recognition, archives rich Show Notes, and prepares traceable evidence for an
-agent-generated summary.
+agent-generated summary. It also keeps structured evidence, protected personal
+notes, a local searchable knowledge index, low-cost RSS discovery, and
+rebuildable exports for common PKM tools.
 
 For YouTube and Bilibili, the skill selects an audio-only stream instead of
 downloading video. It also accepts local course audio and video files; local
@@ -36,6 +40,8 @@ The scripts perform deterministic operations:
 7. Persist resumable job state and produce an agent instruction for synthesis.
 8. Verify all artifacts after the agent writes the final report.
 9. Maintain one human-readable Markdown catalog with direct reading links and completion status.
+10. Build a local JSONL knowledge index without requiring a vector database.
+11. Export rebuildable Obsidian, Notion, Zotero, NotebookLM, and MCP-friendly artifacts.
 
 The final summary links to the independent transcript instead of embedding a
 second copy of the complete text.
@@ -111,6 +117,7 @@ python3 podcast-listener.py --archive-only "EPISODE_URL"
 python3 podcast-listener.py --force-transcribe "EPISODE_URL"
 python3 podcast-listener.py --resume latest
 python3 podcast-listener.py --rebuild-index
+python3 podcast-listener.py --rebuild-knowledge-index
 ```
 
 Full runs reuse a transcript only when the episode identity matches and the
@@ -123,6 +130,38 @@ the agent has written `report_path`, verify the package and mark it complete:
 ```bash
 python3 podcast-listener.py --output-dir "$HOME/Documents/播客总结" \
   --verify "JOB_ID" --require-report
+```
+
+## Knowledge, Search, and RSS Discovery
+
+Each new episode package contains `knowledge.json` and `我的笔记.md`. The agent
+may regenerate AI topics and tags in the JSON file, but it must never overwrite
+the personal notes file. A new job reaches `completed` only when the report has
+a `关键洞察与证据` section and direct quotations pass transcript and timestamp
+verification.
+
+```bash
+python3 podcast-listener.py --rebuild-knowledge-index
+python3 podcast-search.py "AI agents" --person "Sam Altman" --since 2026-01-01
+
+python3 podcast-listener.py --init-subscriptions
+# Edit 资料/订阅/subscriptions.json, then scan metadata only:
+python3 podcast-listener.py --scan-subscriptions
+```
+
+Subscription scanning never downloads episode audio and never starts ASR. It
+deduplicates feed entries, scores publisher transcripts and configured
+keywords, and writes a daily Markdown Brief under `资料/Brief/`.
+
+## Exports
+
+Exports are derived copies. The transcript, report, episode package, and
+personal notes remain the local source of truth.
+
+```bash
+python3 podcast-listener.py --export all
+python3 podcast-listener.py --export obsidian --export-dir "$HOME/Obsidian/Podcast"
+python3 podcast-export.py --format zotero --format notebooklm
 ```
 
 ## Transcript Format
@@ -183,8 +222,14 @@ episode publication date. It is updated automatically and can be rebuilt offline
 ├── 总结稿/
 │   └── *_详细总结.md
 └── 资料/
+    ├── knowledge-index.jsonl
+    ├── 订阅/
+    ├── Brief/
+    ├── 导出/
     └── {show}_{episode}_{date}/
         ├── metadata.json
+        ├── knowledge.json
+        ├── 我的笔记.md
         ├── Agent任务指令.txt
         ├── 转录数据/
         │   ├── segments.json

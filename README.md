@@ -10,7 +10,8 @@ transcription, timestamped transcripts, and durable source archiving.
 
 Give it an episode link and it turns a piece of audio into a reusable research
 package: a source-linked transcript, timestamp data, subtitles, archived Show
-Notes, and clean inputs for an evidence-backed summary. It is practical for
+Notes, structured evidence, protected personal notes, and a searchable local
+knowledge index. It is practical for
 people who listen to long-form podcasts but need to search, quote, review, or
 preserve what they heard without repeatedly scrubbing through the audio.
 
@@ -61,6 +62,9 @@ the agent performs evidence-backed synthesis.
 - Persists resumable jobs and verifies the final report before completion.
 - Keeps transcripts separate from summaries to avoid duplicated artifacts.
 - Maintains one Markdown catalog ordered by report completion time for human browsing and unfinished-work tracking.
+- Stores evidence-backed insights in `knowledge.json` and preserves user-owned `我的笔记.md`.
+- Scans RSS subscriptions into a low-cost daily Brief without automatically running ASR.
+- Exports rebuildable Obsidian, Notion, Zotero, NotebookLM, and MCP-friendly files.
 
 See [README.en.md](README.en.md) for the complete English guide.
 
@@ -93,6 +97,10 @@ Resolve or archive without transcription:
 python3 podcast-listener.py --resolve-only "EPISODE_URL"
 python3 podcast-listener.py --archive-only "EPISODE_URL"
 python3 podcast-listener.py --rebuild-index
+python3 podcast-listener.py --rebuild-knowledge-index
+python3 podcast-listener.py --init-subscriptions
+python3 podcast-listener.py --scan-subscriptions
+python3 podcast-listener.py --export all
 ```
 
 ## Install as a Skill / 安装为 Skill
@@ -125,8 +133,12 @@ downloaded audio, generated transcripts, or storage credentials.
 ├── 总结稿/
 │   └── *_详细总结.md
 └── 资料/
+    ├── knowledge-index.jsonl
+    ├── 订阅/ · Brief/ · 导出/
     └── {show}_{episode}_{date}/
         ├── metadata.json
+        ├── knowledge.json
+        ├── 我的笔记.md
         ├── Agent任务指令.txt
         ├── 转录数据/
         │   ├── segments.json

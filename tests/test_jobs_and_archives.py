@@ -133,6 +133,96 @@ class JobTrackerTests(unittest.TestCase):
         self.assertEqual(completed["status"], "completed")
         self.assertEqual(result["job_status"], "completed")
 
+    def test_new_job_requires_complete_evidence_knowledge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            package = output / "资料" / "fixture"
+            transcript = output / "转录稿" / "fixture_转录稿.txt"
+            report = output / "总结稿" / "fixture_详细总结.md"
+            segments = package / "转录数据" / "segments.json"
+            package.mkdir(parents=True)
+            transcript.parent.mkdir()
+            report.parent.mkdir()
+            segments.parent.mkdir()
+            transcript.write_text("这里的完整证据可以被严格核验。", encoding="utf-8")
+            segments.write_text(
+                '[{"start": 1, "end": 5, "text": "这里的完整证据可以被严格核验。"}]',
+                encoding="utf-8",
+            )
+            srt = package / "转录数据" / "transcript.srt"
+            vtt = package / "转录数据" / "transcript.vtt"
+            metadata = package / "metadata.json"
+            instruction = package / "Agent任务指令.txt"
+            knowledge = package / "knowledge.json"
+            notes = package / "我的笔记.md"
+            srt.write_text("", encoding="utf-8")
+            vtt.write_text("WEBVTT\n", encoding="utf-8")
+            instruction.write_text("fixture", encoding="utf-8")
+            notes.write_text("# 我的笔记\n", encoding="utf-8")
+            metadata.write_text(
+                '{"episode": {"duration_minutes": 1}}', encoding="utf-8"
+            )
+            report.write_text("# 总结\n\n## 关键洞察与证据\n", encoding="utf-8")
+            base_result = {
+                "mode": "transcribe",
+                "transcript_path": str(transcript),
+                "segments_path": str(segments),
+                "srt_path": str(srt),
+                "vtt_path": str(vtt),
+                "metadata_path": str(metadata),
+                "instruction_path": str(instruction),
+                "report_path": str(report),
+                "knowledge_path": str(knowledge),
+                "personal_notes_path": str(notes),
+            }
+            knowledge.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "awaiting_synthesis",
+                        "topics": [],
+                        "entities": [],
+                        "ai_tags": [],
+                        "insights": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            pending = PODCAST.verify_result_artifacts(base_result, require_report=True)
+            knowledge.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "complete",
+                        "topics": ["证据"],
+                        "entities": [],
+                        "ai_tags": ["核验"],
+                        "insights": [
+                            {
+                                "id": "insight-01",
+                                "claim": "证据可核验。",
+                                "evidence": [
+                                    {
+                                        "kind": "quote",
+                                        "quote": "完整证据可以被严格核验",
+                                        "start": 1,
+                                        "end": 5,
+                                        "speaker": None,
+                                        "confidence": "high",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            complete = PODCAST.verify_result_artifacts(base_result, require_report=True)
+
+        self.assertFalse(pending["ok"])
+        self.assertTrue(complete["ok"], complete["errors"])
+
 
 class HumanIndexTests(unittest.TestCase):
     def test_rebuild_human_index_keeps_one_reading_entry_per_episode(self) -> None:

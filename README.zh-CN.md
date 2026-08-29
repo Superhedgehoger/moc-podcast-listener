@@ -2,13 +2,13 @@
 
 **简体中文** | [English](README.en.md) | [多语言首页](README.md)
 
-> 版本：v4.10.1
-> 核心流程：输入单集或课时 → 安全解析/仅提取音轨 → 发布方转录或本地 ASR → 来源归档 → Agent 总结 → 产物核验
+> 版本：v4.15.0
+> 核心流程：输入单集或课时 → 优先复用转录/仅提取音轨 → 来源归档 → 证据化总结 → 个人笔记 → 检索与导出
 
 很多播客值得反复查阅，但音频不方便搜索，Show Notes 中的图片和链接也可能失效。
 这个 Skill 的实际作用，是让你只提供一个单集链接，就自动得到一套可保存、可检索、
 可引用的播客资料：带来源和时间戳的完整转录稿、SRT/WebVTT 字幕、结构化分段、Show Notes
-图文归档，以及供 Agent 生成总结的可靠输入。无论是个人知识管理、内容研究、
+图文归档、可核验的关键洞察、不会被 Agent 覆盖的个人笔记，以及可供检索和导出的本地知识索引。无论是个人知识管理、内容研究、
 访谈引用还是长期收藏，都不必再手工下载音频、复制链接和整理附件。
 
 项目先生成可独立阅读和追溯的转录稿。深度总结由 Agent 按 `SKILL.md` 和
@@ -18,7 +18,7 @@
 输出目录以人类阅读为先：`转录稿/` 只放可直接阅读的 `.txt`，`总结稿/` 只放
 最终总结；字幕、JSON、图片和任务状态统一收进每期 `资料/` 包。根目录的
 `播客索引.md` 是统一阅读入口，按总结完成时间列出节目、单集和处理状态，并直接链接总结稿、
-转录稿、资料包和原始页面。
+转录稿、知识、个人笔记、资料包和原始页面。
 
 
 ---
@@ -29,7 +29,13 @@
 |------|------|
 | `SKILL.md` | 精简的 Agent 执行入口 |
 | `references/report-workflow.md` | 按需加载的总结结构和证据规则 |
+| `references/knowledge-workflow.md` | `knowledge.json` 结构、引述和时间戳核验规则 |
+| `references/library-workflow.md` | 订阅、搜索、个人笔记和导出工作流 |
 | `podcast-listener.py` | 解析播客链接/名称、下载音频、预处理、转录、归档 Show Notes、输出 Agent 指令 |
+| `podcast-search.py` | 搜索本地知识索引，不依赖向量数据库 |
+| `podcast-export.py` | 导出 Obsidian、Notion、Zotero、NotebookLM 和 MCP 文件 |
+| `knowledge_base.py` | 证据校验、个人笔记模板、知识索引和搜索核心 |
+| `subscription_manager.py` | RSS 订阅去重、评分和低成本 Brief |
 | `listen-and-summarize.sh` | 一键转录入口，结束后打印 Agent 后续任务指令 |
 | `chunk_transcript.py` | 超长转录稿分块工具，用于逐块证据提取 |
 | `quick-listen.py` | 快速入口，复用主流程并默认使用 Whisper small |
@@ -86,6 +92,7 @@ python3 podcast-listener.py --archive-only "单集链接"
 python3 podcast-listener.py --force-transcribe "单集链接"
 python3 podcast-listener.py --resume latest
 python3 podcast-listener.py --rebuild-index
+python3 podcast-listener.py --rebuild-knowledge-index
 python3 podcast-listener.py --archive-only \
   --sync-backend local --sync-destination "$HOME/Nutstore Files/播客归档" "单集链接"
 ```
@@ -106,6 +113,28 @@ python3 podcast-listener.py --output-dir "$HOME/Documents/播客总结" \
 每次归档、转录或核验都会自动更新 `播客索引.md`。手动移动或补齐历史文件后，可运行
 `--rebuild-index` 根据 `资料/` 中的元数据重新生成索引；它不会联网，也不会重新转录。
 
+本地知识库、订阅和导出：
+
+```bash
+# 为历史资料补齐 knowledge.json / 我的笔记.md，并重建 JSONL 索引
+python3 podcast-listener.py --rebuild-knowledge-index
+
+# 搜索主题、人物或标签
+python3 podcast-search.py "AI Agent" --person "Sam Altman" --since 2026-01-01
+python3 podcast-search.py --tag "待复习" --json
+
+# 初始化订阅配置；编辑 subscriptions.json 后只扫描 RSS，不自动转录
+python3 podcast-listener.py --init-subscriptions
+python3 podcast-listener.py --scan-subscriptions
+
+# 导出全部或单一格式
+python3 podcast-listener.py --export all
+python3 podcast-listener.py --export obsidian --export-dir "$HOME/Obsidian/Podcast"
+```
+
+`我的笔记.md` 中 `- 用户标签：` 一行可写 `#待复习 #研究素材`。AI 标签保存在
+`knowledge.json`，可重新生成；用户标签和正文笔记只属于用户，任何自动流程都不得覆盖。
+
 处理完成后输出目录结构如下（`总结稿/` 中的最终报告由 Agent 后续写入）：
 
 ```text
@@ -121,8 +150,16 @@ python3 podcast-listener.py --output-dir "$HOME/Documents/播客总结" \
 ├── 总结稿/
 │   └── {节目名称}_{播客标题}_{发布日期}_详细总结.md
 └── 资料/
+    ├── knowledge-index.jsonl
+    ├── 订阅/
+    │   ├── subscriptions.json
+    │   └── state.json
+    ├── Brief/
+    ├── 导出/
     └── {节目名称}_{播客标题}_{发布日期}/
         ├── metadata.json
+        ├── knowledge.json
+        ├── 我的笔记.md
         ├── Agent任务指令.txt
         ├── 转录数据/
         │   ├── segments.json
@@ -148,6 +185,10 @@ python3 podcast-listener.py --output-dir "$HOME/Documents/播客总结" \
 总结稿中的「转录稿」章节只介绍独立转录文件，并使用相对路径链接人类可读的
 `_转录稿.txt`，以及 `资料/` 中的 segments、SRT、VTT 和可选章节 JSON。
 完整转录正文不会再次嵌入总结稿。
+
+新作业的总结完成条件更严格：Agent 还必须同步完成 `knowledge.json`，每条核心洞察至少
+提供一条引述或转述证据；直接引述需要同时匹配转录稿正文和对应时间戳 segments。报告中
+必须保留「关键洞察与证据」章节。`--verify --require-report` 全部通过后，作业才是完成状态。
 
 旧版本生成的平铺目录可先预览、再迁移。正式迁移默认会把受影响文件备份到
 `.backup/`，并同步修正转录稿、总结稿、Manifest 与作业状态中的本地路径：

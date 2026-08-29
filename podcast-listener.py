@@ -37,6 +37,12 @@ from urllib.parse import parse_qs, quote, urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 import xml.etree.ElementTree as ET
 
+from knowledge_base import (
+    PERSONAL_NOTES_FILENAME,
+    ensure_episode_knowledge_files,
+    rebuild_knowledge_index,
+    validate_knowledge,
+)
 from version import __version__
 
 
@@ -735,6 +741,21 @@ def rss_items(feed_xml: str) -> list[dict[str, Any]]:
                     "source": "rss",
                 }
             )
+    return items
+
+
+def subscription_feed_entries(feed_url: str) -> list[dict[str, Any]]:
+    """Fetch RSS metadata for Brief generation without downloading episode audio."""
+    feed_xml = fetch_text(feed_url, timeout=50)
+    if not feed_xml:
+        raise RuntimeError("RSS feed could not be fetched")
+    items = rss_items(feed_xml)
+    for item in items:
+        if item.get("url"):
+            item["url"] = urljoin(feed_url, str(item["url"]))
+        for transcript in item.get("transcripts") or []:
+            if isinstance(transcript, dict) and transcript.get("url"):
+                transcript["url"] = urljoin(feed_url, str(transcript["url"]))
     return items
 
 
@@ -3563,6 +3584,8 @@ def build_agent_instruction(
     srt_path: Path,
     vtt_path: Path,
     metadata_path: Path,
+    knowledge_path: Path,
+    personal_notes_path: Path,
     chunk_command: str,
     info: dict[str, Any],
     transcript_chars: int,
@@ -3577,6 +3600,7 @@ def build_agent_instruction(
     guests_text = ", ".join(info.get("guests") or []) or "未自动识别"
     report_path = output_dir / "总结稿" / f"{combined_name}_详细总结.md"
     workflow_path = Path(__file__).with_name("references") / "report-workflow.md"
+    knowledge_workflow_path = Path(__file__).with_name("references") / "knowledge-workflow.md"
     job_lines = ""
     verification_step = ""
     if job_id:
@@ -3586,7 +3610,7 @@ def build_agent_instruction(
             f"- 作业结果：{job_result_path}\n"
         )
         verification_step = (
-            "8. 总结稿写入后执行完整性核验；只有该命令成功，作业才从 "
+            "9. 总结稿写入后执行完整性核验；只有该命令成功，作业才从 "
             "`awaiting_report` 变为 `completed`：\n"
             f'   "{sys.executable}" "{Path(__file__).resolve()}" '
             f'--output-dir "{output_dir}" --verify "{job_id}" --require-report\n'
@@ -3600,6 +3624,9 @@ def build_agent_instruction(
 - WebVTT 字幕：{vtt_path}
 - 元数据：{metadata_path}
 - 报告工作流：{workflow_path}
+- 知识与证据工作流：{knowledge_workflow_path}
+- 结构化知识：{knowledge_path}
+- 我的笔记（只读，不得覆盖）：{personal_notes_path}
 {f"- Show Notes Markdown：{info.get('shownotes_archive', {}).get('markdown_path')}" if info.get('shownotes_archive') else ""}
 {f"- Show Notes 图片/链接 Manifest：{info.get('shownotes_archive', {}).get('manifest_path')}" if info.get('shownotes_archive') else ""}
 {f"- Podcasting 2.0 章节：{info.get('chapters_archive', {}).get('path')}" if info.get('chapters_archive', {}).get('ok') else ""}
@@ -3622,14 +3649,18 @@ def build_agent_instruction(
 3. 长转录稿逐块独立提取证据、实体、引述和时间戳；合并去重后只做一次正式整合，禁止每块重写整篇总结。
 4. 引述必须与转录稿一致，并尽量附时间戳。没有说话人证据时写“说话人未确认”，禁止猜测姓名。
 5. 按“报告工作流”文件生成报告；保留 Show Notes，并在「转录稿」章节介绍独立转录文件及其链接，禁止把完整转录正文复制进总结稿。
-6. 仅对 60 分钟以上、高风险主题或用户明确要求的深度版执行独立质检。
-7. 提交前确认：
+6. 按“知识与证据工作流”把 `{knowledge_path}` 从草稿更新为 `complete`；每条关键洞察必须有可在 transcript/segments 中核验的引述或明确标注的转述。不得修改或覆盖 `{personal_notes_path}`。
+7. 仅对 60 分钟以上、高风险主题或用户明确要求的深度版执行独立质检。
+8. 提交前确认：
    - [ ] 包含「📋 基本信息」表格，所有字段已填写
    - [ ] 核心观点包含具体证据、案例、数字或机制
    - [ ] 引述已核对原文，且未猜测说话人
    - [ ] 包含背景与术语、实用资源、延伸思考与局限
    - [ ] 正文字数 ≥ {target_words} 字（不含 Show Notes）
    - [ ] 包含原始 Show Notes
+   - [ ] 包含「关键洞察与证据」，且与 knowledge.json 一致
+   - [ ] knowledge.json 状态为 complete，并通过引述与时间戳核验
+   - [ ] 我的笔记.md 未被覆盖
    - [ ] 包含独立转录稿、segments、SRT、WebVTT 的相对链接，且未嵌入完整转录正文
 
    写入最终目标文件：
@@ -3921,6 +3952,8 @@ def rebuild_human_index(output_dir: Path) -> Path:
         package_name = metadata_path.parent.name
         transcript_path = output_dir / "转录稿" / f"{package_name}_转录稿.txt"
         report_path = output_dir / "总结稿" / f"{package_name}_详细总结.md"
+        knowledge_path = metadata_path.parent / "knowledge.json"
+        personal_notes_path = metadata_path.parent / PERSONAL_NOTES_FILENAME
         mode = str(payload.get("mode") or "transcribe")
         transcription = payload.get("transcription") or {}
         transcript_time = parse_index_timestamp(
@@ -3948,6 +3981,12 @@ def rebuild_human_index(output_dir: Path) -> Path:
                 if report_path.is_file()
                 else "",
                 "metadata": relative_output_path(metadata_path, output_dir),
+                "knowledge": relative_output_path(knowledge_path, output_dir)
+                if knowledge_path.is_file()
+                else "",
+                "personal_notes": relative_output_path(personal_notes_path, output_dir)
+                if personal_notes_path.is_file()
+                else "",
             }
         )
 
@@ -3980,6 +4019,10 @@ def rebuild_human_index(output_dir: Path) -> Path:
             links.append(f"[总结稿](<{row['report']}>)")
         if row["transcript"]:
             links.append(f"[转录稿](<{row['transcript']}>)")
+        if row["knowledge"]:
+            links.append(f"[知识](<{row['knowledge']}>)")
+        if row["personal_notes"]:
+            links.append(f"[我的笔记](<{row['personal_notes']}>)")
         links.append(f"[资料](<{row['metadata']}>)")
         if row["url"]:
             links.append(f"[原始页面]({row['url']})")
@@ -4301,6 +4344,25 @@ def verify_result_artifacts(
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             errors.append(f"metadata JSON is invalid: {metadata_path}: {exc}")
 
+    knowledge_path = None
+    raw_knowledge_path = result.get("knowledge_path")
+    if mode == "transcribe" and raw_knowledge_path:
+        knowledge_path = check_file("knowledge", raw_knowledge_path)
+        check_file("personal_notes", result.get("personal_notes_path"))
+        if knowledge_path:
+            episode = metadata_payload.get("episode") or {}
+            knowledge_verification = validate_knowledge(
+                knowledge_path,
+                transcript_path=transcript_path,
+                segments_path=segments_path,
+                duration_minutes=float(episode.get("duration_minutes") or 0.0)
+                if isinstance(episode, dict)
+                else 0.0,
+                require_complete=require_report,
+            )
+            errors.extend(knowledge_verification.get("errors") or [])
+            warnings.extend(knowledge_verification.get("warnings") or [])
+
     archive = result.get("shownotes_archive") or {}
     if archive:
         markdown_path = check_file("shownotes_markdown", archive.get("markdown_path"))
@@ -4372,6 +4434,8 @@ def verify_result_artifacts(
                 warnings.append(message)
         else:
             report = report_path.read_text(encoding="utf-8")
+            if require_report and raw_knowledge_path and "关键洞察与证据" not in report:
+                errors.append("report is missing section: 关键洞察与证据")
             for raw_link in re.findall(r"\[[^\]]+\]\((?:<)?([^)>]+)(?:>)?\)", report):
                 parsed = urlparse(raw_link)
                 if parsed.scheme or raw_link.startswith("#"):
@@ -4419,6 +4483,7 @@ def run_verify(output_dir: Path, target: str, *, require_report: bool) -> int:
         tracker = JobTracker(job_path.parent, read_json_object(job_path), resumed=True)
         tracker.mark_report_complete()
     if verification["ok"]:
+        verification["knowledge_index"] = rebuild_knowledge_index(output_dir)
         verification["index_path"] = str(rebuild_human_index(output_dir))
     print(json.dumps(verification, ensure_ascii=False, indent=2))
     return 0 if verification["ok"] else 1
@@ -4450,12 +4515,33 @@ def parse_cli_args() -> argparse.Namespace:
         action="store_true",
         help="根据现有资料包重建根目录的播客索引，不解析或转录",
     )
+    mode.add_argument(
+        "--rebuild-knowledge-index",
+        action="store_true",
+        help="为现有资料包补齐知识/笔记模板并重建本地知识索引",
+    )
+    mode.add_argument(
+        "--init-subscriptions",
+        action="store_true",
+        help="创建低成本 RSS 订阅发现配置，不下载音频",
+    )
+    mode.add_argument(
+        "--scan-subscriptions",
+        action="store_true",
+        help="扫描订阅并生成去重评分 Brief，不启动转录",
+    )
+    mode.add_argument(
+        "--export",
+        choices=("all", "obsidian", "notion", "zotero", "notebooklm", "mcp"),
+        help="从本地知识索引导出可重建的 PKM/Agent 文件",
+    )
     parser.add_argument(
         "--force-transcribe",
         action="store_true",
         help="忽略已有转录产物，重新下载和转录",
     )
     parser.add_argument("--output-dir", help="覆盖输出目录")
+    parser.add_argument("--export-dir", help="覆盖知识库导出目录")
     parser.add_argument(
         "--engine",
         choices=("sensevoice", "whisper", "stitch"),
@@ -4507,8 +4593,17 @@ def parse_cli_args() -> argparse.Namespace:
         help="核验时要求正式总结稿已经生成",
     )
     args = parser.parse_args()
-    if not args.input and not args.resume and not args.verify and not args.rebuild_index:
-        parser.error("请提供播客输入，或使用 --resume / --verify / --rebuild-index")
+    standalone_mode = any(
+        (
+            args.rebuild_index,
+            args.rebuild_knowledge_index,
+            args.init_subscriptions,
+            args.scan_subscriptions,
+            bool(args.export),
+        )
+    )
+    if not args.input and not args.resume and not args.verify and not standalone_mode:
+        parser.error("请提供播客输入，或使用索引、订阅、导出或核验命令")
     if args.verify and (args.input or args.resume):
         parser.error("--verify 不能与播客输入或 --resume 同时使用")
     if args.verify and args.archive_only:
@@ -4521,6 +4616,8 @@ def parse_cli_args() -> argparse.Namespace:
         parser.error("--resolve-only 不能与 --resume / --verify 同时使用")
     if args.rebuild_index and (args.input or args.resume or args.verify):
         parser.error("--rebuild-index 不能与播客输入、--resume 或 --verify 同时使用")
+    if standalone_mode and (args.input or args.resume or args.verify):
+        parser.error("索引、订阅和导出命令不能与播客输入、--resume 或 --verify 同时使用")
     if args.require_report and not args.verify:
         parser.error("--require-report 只能与 --verify 同时使用")
     return args
@@ -4681,6 +4778,38 @@ def main() -> None:
     if getattr(args, "rebuild_index", False):
         index_path = rebuild_human_index(output_dir)
         emit_result({"mode": "rebuild-index", "index_path": str(index_path)}, print_json=True)
+        return
+    if getattr(args, "rebuild_knowledge_index", False):
+        payload = rebuild_knowledge_index(output_dir)
+        payload["mode"] = "rebuild-knowledge-index"
+        payload["human_index_path"] = str(rebuild_human_index(output_dir))
+        emit_result(payload, print_json=True)
+        return
+    if getattr(args, "init_subscriptions", False):
+        from subscription_manager import initialize_subscriptions
+
+        payload = initialize_subscriptions(output_dir)
+        payload["mode"] = "init-subscriptions"
+        emit_result(payload, print_json=True)
+        return
+    if getattr(args, "scan_subscriptions", False):
+        from subscription_manager import scan_subscriptions
+
+        payload = scan_subscriptions(output_dir, subscription_feed_entries)
+        payload["mode"] = "scan-subscriptions"
+        emit_result(payload, print_json=True)
+        return
+    if getattr(args, "export", None):
+        from knowledge_export import export_library
+
+        formats = None if args.export == "all" else {str(args.export)}
+        payload = export_library(
+            output_dir,
+            formats=formats,
+            export_dir=Path(args.export_dir).expanduser() if args.export_dir else None,
+        )
+        payload["mode"] = "export"
+        emit_result(payload, print_json=True)
         return
     if getattr(args, "verify", None):
         raise SystemExit(
@@ -5048,6 +5177,13 @@ def main() -> None:
             srt_path,
             vtt_path,
         )
+        report_path = summary_dir / f"{combined_name}_详细总结.md"
+        knowledge_path, personal_notes_path = ensure_episode_knowledge_files(
+            episode_dir,
+            info,
+            transcript_path=transcript_path,
+            report_path=report_path,
+        )
 
         chunk_script = Path(__file__).with_name("chunk_transcript.py")
         chunk_dir = transcript_data_dir / "分块"
@@ -5061,6 +5197,8 @@ def main() -> None:
             srt_path=srt_path,
             vtt_path=vtt_path,
             metadata_path=metadata_path,
+            knowledge_path=knowledge_path,
+            personal_notes_path=personal_notes_path,
             chunk_command=chunk_command,
             info=info,
             transcript_chars=len(transcript),
@@ -5083,7 +5221,9 @@ def main() -> None:
             "vtt_path": str(vtt_path),
             "metadata_path": str(metadata_path),
             "instruction_path": str(instruction_path),
-            "report_path": str(summary_dir / f"{combined_name}_详细总结.md"),
+            "report_path": str(report_path),
+            "knowledge_path": str(knowledge_path),
+            "personal_notes_path": str(personal_notes_path),
             "shownotes_archive": shownotes_archive,
             "chapters_archive": chapters_archive,
             "chapters_path": (
@@ -5092,6 +5232,7 @@ def main() -> None:
                 else None
             ),
         }
+        result_payload["knowledge_index"] = rebuild_knowledge_index(output_dir)
         result_payload["index_path"] = str(rebuild_human_index(output_dir))
         if tracker:
             result_payload = tracker.finish(result_payload, awaiting_report=True)

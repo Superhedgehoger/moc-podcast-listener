@@ -17,13 +17,13 @@ Use the bundled scripts for deterministic retrieval, transcription, Show Notes a
 python3 "<skill-directory>/podcast-listener.py" "EPISODE_URL_OR_SEARCH_TERMS"
 ```
 
-The script first uses a publisher-provided Podcasting 2.0 transcript when one is available, then falls back to local ASR. It writes a transcript, timestamp segments, SRT and WebVTT subtitles, metadata, optional Podcasting 2.0 chapters, archived Show Notes, a media manifest, persistent job state, and an `_Agent任务指令.txt` file. Follow the generated instruction file to finish the report.
+The script first uses a publisher-provided Podcasting 2.0 transcript when one is available, then falls back to local ASR. It writes a transcript, timestamp segments, SRT and WebVTT subtitles, metadata, optional Podcasting 2.0 chapters, archived Show Notes, a media manifest, persistent job state, a draft `knowledge.json`, a protected `我的笔记.md`, and an `Agent任务指令.txt` file. Follow the generated instruction file to finish both the report and structured knowledge.
 
 Human-facing folders stay minimal: `转录稿/` contains only readable transcript
 text and `总结稿/` contains reports. Treat files under
 `资料/<show>_<episode>_<date>/` as the episode's machine-readable package.
 Use the automatically maintained `播客索引.md` as the human-facing catalog.
-It links each episode's report, transcript, source page, and metadata, and marks
+It links each episode's report, transcript, knowledge, personal notes, source page, and metadata, and marks
 items as `待总结`, `已完成`, `仅归档`, or `资料不完整`. Completed items are
 ordered by report verification time; pending items are ordered by transcription
 time. Do not use the episode publication date as the catalog sort key.
@@ -38,6 +38,7 @@ python3 "<skill-directory>/podcast-listener.py" --archive-only "EPISODE_INPUT"
 python3 "<skill-directory>/podcast-listener.py" --force-transcribe "EPISODE_INPUT"
 python3 "<skill-directory>/podcast-listener.py" --resume latest
 python3 "<skill-directory>/podcast-listener.py" --rebuild-index
+python3 "<skill-directory>/podcast-listener.py" --rebuild-knowledge-index
 ```
 
 Full runs reuse a matching existing transcript by default.
@@ -68,7 +69,7 @@ Read [references/storage-and-speakers.md](references/storage-and-speakers.md) wh
 
 ## Summarize
 
-Read [references/report-workflow.md](references/report-workflow.md) before producing a report.
+Read [references/report-workflow.md](references/report-workflow.md) and [references/knowledge-workflow.md](references/knowledge-workflow.md) before producing a report.
 
 - For a course lesson, preserve the same evidence and citation requirements, but organize the report around learning objectives, concepts, demonstrations, procedures, assignments, and unresolved questions rather than pretending it is a podcast interview.
 
@@ -80,6 +81,21 @@ Read [references/report-workflow.md](references/report-workflow.md) before produ
 - Keep the transcript as a separate source document. In the report, describe it and link the transcript, segments JSON, SRT, WebVTT, and archived chapter JSON when present, using paths relative to the report; never embed the complete transcript.
 - Name artifacts from the podcast show, episode title, and publication date. Do not add distribution platform names such as Overcast or 小宇宙 to filenames.
 - Do not claim that a URL or image was archived unless its manifest entry reports success.
+- Complete the episode package's `knowledge.json` together with the report. Every core insight needs evidence and direct quotations must match transcript text and timestamp segments.
+- Never overwrite `我的笔记.md`. AI topics/tags belong in `knowledge.json`; user comments and user tags belong only in the personal notes file.
+
+## Knowledge Library
+
+Read [references/library-workflow.md](references/library-workflow.md) when the user asks to search, monitor subscriptions, or export.
+
+```bash
+python3 "<skill-directory>/podcast-search.py" "QUERY" --person "PERSON" --tag "TAG"
+python3 "<skill-directory>/podcast-listener.py" --init-subscriptions
+python3 "<skill-directory>/podcast-listener.py" --scan-subscriptions
+python3 "<skill-directory>/podcast-listener.py" --export all
+```
+
+Subscription scans are discovery-only: they may fetch RSS metadata but must not download episode audio or start ASR. Treat `knowledge-index.jsonl`, Briefs, and exports as rebuildable derivatives; the transcript, report, episode package, and personal notes are the source of truth.
 
 ## Verify
 
@@ -87,7 +103,7 @@ Before returning:
 
 1. Confirm the report file exists at `report_path` from `result.json`.
 2. Confirm required sections from the report workflow are present.
-3. Check quotations against transcript text and timestamp segments.
+3. Confirm the report contains `关键洞察与证据`, complete `knowledge.json`, and check quotations against transcript text and timestamp segments.
 4. Count summary body characters without Show Notes.
 5. Confirm the report's transcript, segments, SRT, WebVTT, and optional chapter links resolve.
 6. Report any unavailable images, links, speaker identities, or transcription gaps explicitly.
@@ -98,7 +114,7 @@ python3 "<skill-directory>/podcast-listener.py" \
   --output-dir "OUTPUT_DIR" --verify "JOB_ID" --require-report
 ```
 
-Return success only after `status.json` reports `completed`. A status of `awaiting_report` means transcription is done but the requested report is not.
+Return success only after `status.json` reports `completed`. A status of `awaiting_report` means transcription is done but the requested report or structured evidence is not complete.
 
 ## Transcript format
 

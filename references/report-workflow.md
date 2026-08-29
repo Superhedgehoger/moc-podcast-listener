@@ -65,6 +65,12 @@ quotation, timestamp, artifact-link, and verification requirements.
 
 Each major point must include its evidence, example, or reasoning and any relevant limitation.
 
+## 关键洞察与证据
+
+List the most reusable claims. For each one, include a checked quotation or an
+explicitly labeled paraphrase, its timestamp range, speaker status, and
+confidence. Keep this section synchronized with `knowledge.json`.
+
 ## 关键引述
 
 Use exact transcript wording. Add `[HH:MM:SS]` when available and do not guess the speaker.
@@ -99,7 +105,9 @@ Example:
 - [章节数据](<../资料/{节目名称}_{播客标题}_{发布日期}/转录数据/chapters.json>)（存在时）
 ```
 
-Before finalizing, verify all quotations, rebase and preserve image-relative paths, list
+Before finalizing, complete `knowledge.json` according to
+`references/knowledge-workflow.md`, leave `我的笔记.md` untouched, verify all
+quotations, rebase and preserve image-relative paths, list
 failed media downloads from the manifest, and confirm every transcript link
 resolves from the report directory. Then run the exact `--verify JOB_ID
 --require-report` command from `_Agent任务指令.txt`. Do not report the podcast

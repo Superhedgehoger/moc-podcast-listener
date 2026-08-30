@@ -17,7 +17,7 @@ Use the bundled scripts for deterministic retrieval, transcription, Show Notes a
 python3 "<skill-directory>/podcast-listener.py" "EPISODE_URL_OR_SEARCH_TERMS"
 ```
 
-The script first uses a publisher-provided Podcasting 2.0 transcript when one is available, then falls back to local ASR. It writes a transcript, timestamp segments, SRT and WebVTT subtitles, metadata, optional Podcasting 2.0 chapters, archived Show Notes, a media manifest, persistent job state, a draft `knowledge.json`, a protected `我的笔记.md`, and an `Agent任务指令.txt` file. Follow the generated instruction file to finish both the report and structured knowledge.
+After resolving a link, the script must look for an official transcript before downloading audio. The priority is publisher/Podcasting 2.0 transcript, platform manual captions, platform automatic captions, then local ASR. A usable official source is saved under the episode package and used directly; audio is downloaded only when official text is unavailable, incomplete, or explicitly needed for diarization. The script writes a readable transcript, timestamp segments, SRT and WebVTT subtitles, metadata, optional Podcasting 2.0 chapters, archived Show Notes, a media manifest, persistent job state, a draft `knowledge.json`, a protected `我的笔记.md`, and an `Agent任务指令.txt` file. Follow the generated instruction file to finish both the report and structured knowledge.
 
 Human-facing folders stay minimal: `转录稿/` contains only readable transcript
 text and `总结稿/` contains reports. Treat files under
@@ -62,7 +62,7 @@ Use these environment variables only when needed:
 - `SHOWNOTES_PUBLIC_BASE_URL`: Optional public base URL used in a generated `_published.md`.
 - `SHOWNOTES_SYNC_REQUIRED=1`: Exit with failure when configured storage sync fails.
 - `DIARIZATION=1`: Add anonymous speaker labels using optional pyannote dependencies.
-- `PREFER_PUBLISHER_TRANSCRIPT=0`: Disable publisher transcript preference and use cached/local ASR instead.
+- `PREFER_PUBLISHER_TRANSCRIPT=0`: Disable official transcript preference and use cached/local ASR instead.
 - `ALLOW_PROXY_FAKE_IP=0`: Disable transparent-proxy domain mappings in `198.18.0.0/15`; literal non-public IP URLs are always blocked.
 
 Read [references/storage-and-speakers.md](references/storage-and-speakers.md) when configuring storage or speaker diarization. Prefer a local sync folder for private, low-cost archives; use S3/R2 only when stable public image URLs are needed.

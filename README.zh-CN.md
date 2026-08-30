@@ -2,7 +2,7 @@
 
 **简体中文** | [English](README.en.md) | [多语言首页](README.md)
 
-> 版本：v4.15.1
+> 版本：v4.16.0
 > 核心流程：输入单集或课时 → 优先复用转录/仅提取音轨 → 来源归档 → 证据化总结 → 个人笔记 → 检索与导出
 
 很多播客值得反复查阅，但音频不方便搜索，Show Notes 中的图片和链接也可能失效。
@@ -100,8 +100,10 @@ python3 podcast-listener.py --archive-only \
 ```
 
 完整运行默认复用 URL 或单集 ID 匹配的已有转录稿；使用 `--force-transcribe` 强制重转。
-若 RSS 提供 Podcasting 2.0 `<podcast:transcript>`，默认优先保存并使用发布方转录，
-仅在不可用时下载音频并运行 SenseVoice/Whisper。
+拿到链接后会先查找官方 Transcript。优先级依次为：发布方 RSS / Podcasting 2.0
+Transcript、YouTube/Bilibili 人工字幕、平台自动字幕、本地 SenseVoice/Whisper。
+官方文本通过完整性检查后会保存原文件并直接使用，不再下载音频；只有缺失、不完整，
+或明确需要说话人识别时才获取音频。
 
 每次非 `--resolve-only` 运行都会创建持久化作业。转录产物写完后状态是
 `awaiting_report`，表示“转录完成、总结未完成”；按任务指令生成总结并核验后才是
@@ -217,9 +219,9 @@ python3 scripts/migrate_output_layout.py "$HOME/Documents/播客总结" --apply
 ```text
 解析链接或名称
   ↓
-提取音频 URL、发布方转录、章节、Show Notes、嘉宾/说话人候选
+提取官方 Transcript、音频 URL、章节、Show Notes、嘉宾/说话人候选
   ↓
-优先获取发布方 VTT/SRT/JSON 转录；不可用时下载音频
+优先保存并使用发布方或平台 VTT/SRT/JSON 转录；不可用时下载音频
   ↓
 ffmpeg 转换为单声道 WAV；VAD 需要时内部生成 16kHz 临时副本
   ↓
@@ -316,7 +318,7 @@ Agent 应对每块独立提取观点、证据、实体和引述，合并去重�
 | `S3_ENDPOINT_URL` | AWS 默认 | R2 等 S3 兼容服务的 endpoint |
 | `DIARIZATION` | `0` | 设为 `1` 时用 pyannote 添加匿名说话人标签 |
 | `HF_TOKEN` | 无 | pyannote 模型访问令牌 |
-| `PREFER_PUBLISHER_TRANSCRIPT` | `1` | 设为 `0` 时禁用 RSS 发布方转录优先策略 |
+| `PREFER_PUBLISHER_TRANSCRIPT` | `1` | 设为 `0` 时禁用官方 Transcript 优先策略 |
 | `ALLOW_PROXY_FAKE_IP` | `1` | 兼容 Clash/Surge 类透明代理的 `198.18.0.0/15` 域名映射；设为 `0` 可严格禁用 |
 | `PYTHON_BIN` | `python3` | shell 入口使用的 Python；说话人识别建议 `python3.12` |
 

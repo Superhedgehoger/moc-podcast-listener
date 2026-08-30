@@ -31,7 +31,7 @@ MOC Podcast Listener 面向 Codex、OpenClaw 及其他支持 `SKILL.md` 的 Agen
 - 支持本地常见音频与视频课程文件，按课时生成独立转录和总结。
 - 默认使用 SenseVoice-Small，失败时降级至 faster-whisper 或
   openai-whisper。
-- RSS 提供 Podcasting 2.0 转录时优先采用发布方版本，避免重复 ASR。
+- 拿到链接后先查官方 Transcript：RSS/Podcasting 2.0、平台人工字幕、平台自动字幕；均不可用时才运行 ASR。
 - 生成带节目名称、标题、原始链接、日期、引擎和时间戳的独立转录稿。
 - 同时输出 segments JSON、SRT 与 WebVTT，方便引用、检索和二次处理。
 - 将 Show Notes 转为 Markdown，始终记录单集封面，并可下载正文图片。
@@ -52,7 +52,7 @@ the agent performs evidence-backed synthesis.
   YouTube, Bilibili, NetEase Cloud Music, Ximalaya, Lizhi FM, and RSS.
 - Uses SenseVoice-Small by default, with faster-whisper and openai-whisper
   fallbacks.
-- Prefers Podcasting 2.0 publisher transcripts when feeds provide them.
+- Prefers publisher transcripts and platform captions, saves the original source, and runs ASR only when needed.
 - Produces a self-contained transcript with source metadata and timestamps.
 - Exports timestamp segments as JSON plus SRT and WebVTT subtitles.
 - Archives Show Notes as Markdown, always records episode artwork, and preserves inline images.

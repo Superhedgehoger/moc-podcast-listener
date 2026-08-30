@@ -99,7 +99,8 @@ Briefly describe the transcript format and known ASR limitations. Link to the
 independent transcript, timestamp segments, SRT, WebVTT, and Podcasting 2.0
 chapters when available, using paths relative to the report file. Do not copy
 the full transcript into the report. When metadata says the source is
-`publisher_transcript`, describe it as publisher-provided rather than ASR.
+`publisher_transcript`, use `source_kind` to distinguish publisher text,
+platform manual captions, and platform automatic captions rather than describing it as ASR.
 
 Example:
 

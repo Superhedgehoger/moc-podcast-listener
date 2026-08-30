@@ -4,7 +4,7 @@
 
 ## Overview
 
-> Version: v4.15.1
+> Version: v4.16.0
 
 MOC Podcast Listener is a practical, local-first skill for turning podcast
 episodes and course lessons into durable research material. It resolves media, prefers an
@@ -33,8 +33,8 @@ The scripts perform deterministic operations:
 
 1. Resolve an episode URL, course link, local media file, RSS item, or search query.
 2. Extract episode metadata, audio, Show Notes, and speaker candidates.
-3. Prefer a Podcasting 2.0 publisher transcript; otherwise download and preprocess audio.
-4. Transcribe locally with SenseVoice-Small or Whisper when needed.
+3. Look for an official transcript: publisher RSS/Podcasting 2.0, platform manual captions, then platform automatic captions.
+4. Save and use a complete official transcript directly; otherwise download audio and run SenseVoice-Small or Whisper.
 5. Write a self-contained transcript, segments JSON, SRT, and WebVTT.
 6. Archive chapters, Show Notes, episode artwork, inline images, links, and an auditable media manifest.
 7. Persist resumable job state and produce an agent instruction for synthesis.

@@ -367,6 +367,53 @@ class PlatformParsingTests(unittest.TestCase):
         transcribe.assert_not_called()
         self.assertEqual(len(metadata_files), 1)
 
+    def test_official_transcript_skips_audio_and_asr(self) -> None:
+        info = {
+            "id": "caption-only",
+            "title": "Caption Only",
+            "url": "https://video.example/caption-only",
+            "audio_url": None,
+            "show_notes": "",
+            "guests": [],
+            "duration_minutes": 0.0,
+            "show_title": "Channel",
+            "pub_date": "20260830",
+            "source": "youtube",
+            "transcripts": [
+                {
+                    "url": "https://cdn.example/manual.vtt",
+                    "type": "text/vtt",
+                    "kind": "platform_manual",
+                }
+            ],
+        }
+        official = {
+            "text": "这是平台提供的完整人工字幕文本。" * 4,
+            "segments": [{"start": 0, "end": 10, "text": "这是平台提供的完整人工字幕文本。" * 4}],
+            "language": "zh",
+            "model": "publisher-transcript:text/vtt",
+            "source": "publisher_transcript",
+            "source_kind": "platform_manual",
+            "source_url": "https://cdn.example/manual.vtt",
+            "source_path": "/tmp/manual.vtt",
+            "initial_prompt": "",
+        }
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            MODULE, "parse_cli_args", return_value=self.cli_args(tmp)
+        ), patch.object(
+            MODULE, "resolve_episode_info", return_value=info.copy()
+        ), patch.object(
+            MODULE, "load_publisher_transcript", return_value=official
+        ), patch.object(MODULE, "download_audio") as download, patch.object(
+            MODULE, "transcribe_with_fallback"
+        ) as transcribe:
+            MODULE.main()
+            metadata_path = next(Path(tmp).glob("资料/*/metadata.json"))
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        download.assert_not_called()
+        transcribe.assert_not_called()
+        self.assertEqual(metadata["transcription"]["source_kind"], "platform_manual")
+
     def test_existing_transcript_is_reused(self) -> None:
         info = {
             "id": "fixture",
@@ -563,6 +610,30 @@ class PlatformParsingTests(unittest.TestCase):
         self.assertEqual(info["title"], "Apple Fixture Episode")
         self.assertEqual(info["audio_url"], "https://cdn.example.com/apple-fixture.mp3")
 
+    def test_apple_catalog_result_merges_official_rss_transcript(self) -> None:
+        result = json.loads(fixture("apple_episode.json"))["results"][0]
+        rss_info = {
+            "title": "Apple Fixture Episode",
+            "audio_url": "https://cdn.example.com/rss.mp3",
+            "transcripts": [
+                {
+                    "url": "https://publisher.example/transcript.vtt",
+                    "type": "text/vtt",
+                    "language": "en",
+                }
+            ],
+        }
+        with patch.object(MODULE, "itunes_lookup", return_value=[]), patch.object(
+            MODULE, "itunes_search", return_value=[result]
+        ), patch.object(
+            MODULE, "feed_url_from_itunes_result", return_value="https://publisher.example/feed.xml"
+        ), patch.object(MODULE, "select_rss_episode", return_value=rss_info):
+            info = MODULE.get_apple_episode_info(
+                "https://podcasts.apple.com/us/podcast/apple-fixture-episode/id123456789?i=100000000001"
+            )
+        self.assertEqual(info["transcripts"], rss_info["transcripts"])
+        self.assertEqual(info["publisher_feed_url"], "https://publisher.example/feed.xml")
+
     def test_overcast_page(self) -> None:
         with patch.object(MODULE, "fetch_text", return_value=fixture("overcast.html")), patch.object(
             MODULE, "search_episode_info", return_value=None
@@ -749,6 +820,78 @@ class PlatformParsingTests(unittest.TestCase):
             info = MODULE.get_youtube_episode_info("https://www.youtube.com/watch?v=fixture")
         self.assertEqual(info["title"], "YouTube Fixture Episode")
         self.assertTrue(info["audio_url"].endswith("youtube-fixture.m4a"))
+
+    def test_ytdlp_manual_transcript_precedes_automatic_transcript(self) -> None:
+        payload = {
+            "subtitles": {
+                "zh-Hans": [
+                    {
+                        "ext": "vtt",
+                        "url": "https://cdn.example/manual.vtt",
+                        "http_headers": {"User-Agent": "yt-dlp", "Cookie": "secret"},
+                    }
+                ]
+            },
+            "automatic_captions": {
+                "zh-Hans": [{"ext": "vtt", "url": "https://cdn.example/auto.vtt"}],
+                "en": [{"ext": "ttml", "url": "https://cdn.example/ignored.ttml"}],
+            },
+        }
+        candidates = MODULE.ytdlp_transcript_candidates(payload)
+        self.assertEqual([item["kind"] for item in candidates], ["platform_manual", "platform_auto"])
+        self.assertEqual(candidates[0]["url"], "https://cdn.example/manual.vtt")
+        self.assertEqual(candidates[0]["_http_headers"], {"User-Agent": "yt-dlp"})
+
+    def test_youtube_transcript_is_usable_without_audio_format(self) -> None:
+        payload = {
+            "id": "caption-only",
+            "title": "Caption Only",
+            "duration": 120,
+            "automatic_captions": {
+                "en": [{"ext": "vtt", "url": "https://cdn.example/auto.vtt"}]
+            },
+        }
+        completed = subprocess.CompletedProcess(
+            args=["yt-dlp"], returncode=0, stdout=json.dumps(payload), stderr=""
+        )
+        with patch.object(MODULE, "run_command", return_value=completed), patch.object(
+            MODULE, "select_ytdlp_audio_url", return_value=None
+        ):
+            info = MODULE.get_youtube_episode_info("https://www.youtube.com/watch?v=caption-only")
+        self.assertIsNone(info["audio_url"])
+        self.assertEqual(info["transcripts"][0]["kind"], "platform_auto")
+
+    def test_manual_platform_caption_is_preferred_and_saved(self) -> None:
+        info = {
+            "duration_minutes": 0,
+            "transcripts": [
+                {
+                    "url": "https://cdn.example/auto.vtt",
+                    "type": "text/vtt",
+                    "language": "zh",
+                    "kind": "platform_auto",
+                },
+                {
+                    "url": "https://cdn.example/manual.vtt",
+                    "type": "text/vtt",
+                    "language": "zh",
+                    "kind": "platform_manual",
+                },
+            ],
+        }
+
+        def fake_download(url, output_path, **kwargs):
+            self.assertEqual(url, "https://cdn.example/manual.vtt")
+            output_path.write_text(fixture("publisher_transcript.vtt"), encoding="utf-8")
+            return {"ok": True, "path": str(output_path), "source_url": url}
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            MODULE, "download_http_resource", side_effect=fake_download
+        ):
+            transcription = MODULE.load_publisher_transcript(info, Path(tmp), "fixture")
+            source_path = Path(transcription["source_path"])
+            self.assertTrue(source_path.is_file())
+        self.assertEqual(transcription["source_kind"], "platform_manual")
 
     def test_ytdlp_media_ignores_combined_video_url(self) -> None:
         payload = {

@@ -223,12 +223,13 @@ def download_http_resource(
     max_bytes: int | None = None,
     timeout: int = 90,
     referer: str | None = None,
+    request_headers: dict[str, str] | None = None,
     resume: bool = False,
 ) -> dict[str, Any]:
     """Download one HTTP resource with redirect validation and bounded streaming."""
     fetched_at = iso_timestamp()
     existing_bytes = output_path.stat().st_size if resume and output_path.exists() else 0
-    headers: dict[str, str] = {}
+    headers: dict[str, str] = dict(request_headers or {})
     if referer:
         headers["Referer"] = referer
     if existing_bytes:
@@ -272,6 +273,25 @@ def download_http_resource(
         }
     except (HTTPError, URLError, OSError, ValueError) as exc:
         status = exc.code if isinstance(exc, HTTPError) else None
+        # Some media CDNs reject a stale resume offset with HTTP 416.  The
+        # partial file is not usable as evidence; retry this same source from
+        # byte zero once instead of leaving the job in a misleading running
+        # state.  This keeps the normal resume path intact for valid 206
+        # responses while making takeover/retry jobs recoverable.
+        if status == 416 and existing_bytes and resume:
+            try:
+                output_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return download_http_resource(
+                url,
+                output_path,
+                max_bytes=max_bytes,
+                timeout=timeout,
+                referer=referer,
+                request_headers=request_headers,
+                resume=False,
+            )
         return {
             "ok": False,
             "source_url": url,
@@ -1696,6 +1716,35 @@ def episode_info_from_itunes_result(result: dict[str, Any], source_url: str | No
     }
 
 
+def merge_rss_official_artifacts(
+    info: dict[str, Any],
+    feed_url: str | None,
+    *,
+    episode_title: str | None = None,
+    episode_id: str | None = None,
+    source_url: str | None = None,
+) -> dict[str, Any]:
+    """Enrich catalog metadata with publisher-owned RSS transcript artifacts."""
+    if not feed_url:
+        return info
+    rss_info = select_rss_episode(
+        feed_url,
+        episode_title=episode_title or str(info.get("title") or ""),
+        episode_id=episode_id,
+        source_url=source_url or str(info.get("url") or ""),
+    )
+    if not rss_info:
+        return info
+    for key in ("transcripts", "chapters", "people", "images", "language"):
+        if rss_info.get(key):
+            info[key] = rss_info[key]
+    for key in ("show_notes", "cover_url", "guests", "duration_minutes", "show_title", "pub_date"):
+        if rss_info.get(key) and not info.get(key):
+            info[key] = rss_info[key]
+    info["publisher_feed_url"] = feed_url
+    return info
+
+
 def get_apple_episode_info(url: str) -> dict[str, Any] | None:
     ids = parse_apple_podcasts_url(url)
     episode_id = ids.get("episode_id")
@@ -1708,6 +1757,13 @@ def get_apple_episode_info(url: str) -> dict[str, Any] | None:
             if item.get("wrapperType") == "podcastEpisode" or item.get("kind") == "podcast-episode":
                 direct_info = episode_info_from_itunes_result(item, source_url=url)
                 if direct_info:
+                    direct_info = merge_rss_official_artifacts(
+                        direct_info,
+                        feed_url_from_itunes_result(item),
+                        episode_title=str(item.get("trackName") or item.get("trackCensoredName") or ""),
+                        episode_id=episode_id,
+                        source_url=url,
+                    )
                     direct_info["source"] = "apple_podcasts"
                     return direct_info
                 episode_title = item.get("trackName") or item.get("trackCensoredName")
@@ -1721,6 +1777,13 @@ def get_apple_episode_info(url: str) -> dict[str, Any] | None:
                 if str(item.get("trackId") or "") == episode_id or f"i={episode_id}" in str(item.get("trackViewUrl") or ""):
                     direct_info = episode_info_from_itunes_result(item, source_url=url)
                     if direct_info:
+                        direct_info = merge_rss_official_artifacts(
+                            direct_info,
+                            feed_url_from_itunes_result(item),
+                            episode_title=str(item.get("trackName") or item.get("trackCensoredName") or ""),
+                            episode_id=episode_id,
+                            source_url=url,
+                        )
                         direct_info["source"] = "apple_podcasts"
                         return direct_info
                     episode_title = item.get("trackName") or item.get("trackCensoredName")
@@ -2059,6 +2122,63 @@ def select_ytdlp_audio_url(
     return None
 
 
+def ytdlp_transcript_candidates(info_json: dict[str, Any]) -> list[dict[str, Any]]:
+    """Convert yt-dlp manual and automatic subtitles into transcript candidates."""
+    media_types = {
+        "vtt": "text/vtt",
+        "srt": "application/x-subrip",
+        "json": "application/json",
+        "json3": "application/json",
+    }
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    allowed_header_names = {
+        "accept",
+        "accept-language",
+        "origin",
+        "referer",
+        "user-agent",
+    }
+    for field, kind in (("subtitles", "platform_manual"), ("automatic_captions", "platform_auto")):
+        tracks = info_json.get(field) or {}
+        if not isinstance(tracks, dict):
+            continue
+        for language, entries in tracks.items():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict) or not entry.get("url"):
+                    continue
+                extension = str(entry.get("ext") or "").lower()
+                media_type = media_types.get(extension)
+                source_url = str(entry["url"])
+                if not media_type or source_url in seen:
+                    continue
+                seen.add(source_url)
+                raw_headers = entry.get("http_headers") or info_json.get("http_headers") or {}
+                safe_headers = (
+                    {
+                        str(key): str(value)
+                        for key, value in raw_headers.items()
+                        if str(key).lower() in allowed_header_names
+                    }
+                    if isinstance(raw_headers, dict)
+                    else {}
+                )
+                candidates.append(
+                    {
+                        "url": source_url,
+                        "type": media_type,
+                        "language": str(language),
+                        "rel": "captions",
+                        "kind": kind,
+                        "name": str(entry.get("name") or ""),
+                        "_http_headers": safe_headers,
+                    }
+                )
+    return candidates
+
+
 def get_youtube_episode_info(url: str) -> dict[str, Any] | None:
     log(f"解析 YouTube 链接: {url}")
     try:
@@ -2070,6 +2190,7 @@ def get_youtube_episode_info(url: str) -> dict[str, Any] | None:
             info_json = json.loads(result.stdout)
             title = info_json.get("title") or "YouTube Video"
             audio_url = select_ytdlp_audio_url(info_json, url, timeout=30)
+            transcripts = ytdlp_transcript_candidates(info_json)
 
             show_notes = info_json.get("description") or ""
             show_title = info_json.get("uploader") or "YouTube Channel"
@@ -2078,7 +2199,7 @@ def get_youtube_episode_info(url: str) -> dict[str, Any] | None:
             if not upload_date:
                 upload_date = time.strftime("%Y%m%d")
                 
-            if audio_url:
+            if audio_url or transcripts:
                 return {
                     "id": info_json.get("id") or safe_filename(title, "youtube"),
                     "title": title,
@@ -2091,6 +2212,8 @@ def get_youtube_episode_info(url: str) -> dict[str, Any] | None:
                     "show_title": show_title,
                     "pub_date": upload_date,
                     "source": "youtube",
+                    "language": info_json.get("language") or None,
+                    "transcripts": transcripts,
                 }
     except Exception as exc:
         warn(f"YouTube/yt-dlp 解析异常: {exc}")
@@ -2112,7 +2235,8 @@ def get_ytdlp_media_info(url: str, source: str) -> dict[str, Any] | None:
         info_json = json.loads(result.stdout)
         title = info_json.get("title") or f"{source} 音频"
         audio_url = select_ytdlp_audio_url(info_json, url)
-        if not audio_url:
+        transcripts = ytdlp_transcript_candidates(info_json)
+        if not audio_url and not transcripts:
             warn(f"{source} 没有可用的纯音频格式，拒绝下载视频格式")
             return None
 
@@ -2129,6 +2253,8 @@ def get_ytdlp_media_info(url: str, source: str) -> dict[str, Any] | None:
             "show_title": info_json.get("channel") or info_json.get("uploader") or source,
             "pub_date": upload_date,
             "source": source,
+            "language": info_json.get("language") or None,
+            "transcripts": transcripts,
         }
     except FileNotFoundError:
         warn("未安装 yt-dlp，跳过该平台的直接解析")
@@ -2318,6 +2444,13 @@ def search_episode_info(query: str) -> dict[str, Any] | None:
             continue
         direct_info = episode_info_from_itunes_result(result, source_url=result.get("trackViewUrl"))
         if direct_info:
+            direct_info = merge_rss_official_artifacts(
+                direct_info,
+                feed_url_from_itunes_result(result),
+                episode_title=str(title or ""),
+                episode_id=str(result.get("trackId") or ""),
+                source_url=result.get("trackViewUrl"),
+            )
             direct_info["source"] = "itunes_episode_search"
             log(f"搜索命中单集: {direct_info['title']}")
             return direct_info
@@ -2924,6 +3057,11 @@ def load_publisher_transcript(
 
     def candidate_score(candidate: dict[str, Any]) -> int:
         score = type_scores.get(str(candidate.get("type") or "").lower(), 0)
+        kind = str(candidate.get("kind") or "")
+        if kind == "platform_manual":
+            score += 100
+        elif kind == "platform_auto":
+            score += 20
         if str(candidate.get("rel") or "").lower() == "captions":
             score += 10
         language = str(candidate.get("language") or "").lower()
@@ -2942,6 +3080,12 @@ def load_publisher_transcript(
             source_path,
             max_bytes=max_bytes,
             timeout=120,
+            referer=str(info.get("url") or "") or None,
+            request_headers=(
+                candidate.get("_http_headers")
+                if isinstance(candidate.get("_http_headers"), dict)
+                else None
+            ),
         )
         if not downloaded.get("ok"):
             warn(f"发布方转录获取失败，将尝试下一格式: {source_url} ({downloaded.get('error')})")
@@ -2967,10 +3111,11 @@ def load_publisher_transcript(
             continue
 
         source = {
-            **candidate,
+            **{key: value for key, value in candidate.items() if key != "_http_headers"},
             **downloaded,
             "path": str(source_path),
             "segment_count": len(segments),
+            "kind": candidate.get("kind") or "publisher",
         }
         info["publisher_transcript"] = source
         return {
@@ -2979,6 +3124,7 @@ def load_publisher_transcript(
             "language": candidate.get("language") or info.get("language") or "unknown",
             "model": f"publisher-transcript:{media_type}",
             "source": "publisher_transcript",
+            "source_kind": candidate.get("kind") or "publisher",
             "source_url": source_url,
             "source_path": str(source_path),
             "initial_prompt": "",
@@ -3749,6 +3895,11 @@ def render_transcript_document(
         f"- 发布日期：{info.get('pub_date') or '未获取'}",
         f"- 音频时长：{duration:.1f} 分钟" if duration else "- 音频时长：未获取",
         f"- 转录引擎：{transcription.get('model') or '未知'}",
+        (
+            f"- 官方转录类型：{transcription.get('source_kind')}"
+            if transcription.get("source") == "publisher_transcript"
+            else "- 官方转录类型：未使用（本地 ASR）"
+        ),
         f"- 语言：{transcription.get('language') or 'unknown'}",
         f"- 生成时间：{generated_at}",
         "",
@@ -3877,6 +4028,7 @@ def write_metadata(
         "transcription": {
             "model": transcription.get("model"),
             "source": transcription.get("source") or "asr",
+            "source_kind": transcription.get("source_kind"),
             "source_url": transcription.get("source_url"),
             "source_path": transcription.get("source_path"),
             "language": transcription.get("language"),
@@ -4800,6 +4952,7 @@ def load_cached_transcription(
             "language": transcription_metadata.get("language") or "unknown",
             "model": transcription_metadata.get("model") or "cached-unknown",
             "source": transcription_metadata.get("source") or "cached",
+            "source_kind": transcription_metadata.get("source_kind"),
             "source_url": transcription_metadata.get("source_url"),
             "source_path": transcription_metadata.get("source_path"),
             "initial_prompt": transcription_metadata.get("initial_prompt") or "",
@@ -5090,8 +5243,9 @@ def main() -> None:
         if publisher_transcription:
             transcription = publisher_transcription
             log(
-                "使用发布方提供的转录，跳过音频下载与 ASR: "
-                f"{publisher_transcription.get('source_url')}"
+                "使用官方 Transcript，跳过音频下载与 ASR: "
+                f"类型={publisher_transcription.get('source_kind') or 'publisher'}, "
+                f"来源={publisher_transcription.get('source_url')}"
             )
             has_speaker_labels = any(
                 segment.get("speaker") for segment in transcription.get("segments") or []

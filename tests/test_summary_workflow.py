@@ -7,6 +7,8 @@ import copy
 import json
 import os
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -83,6 +85,25 @@ class WorkflowFixture(unittest.TestCase):
 
 
 class SummaryWorkflowTests(WorkflowFixture):
+    def test_worker_check_validates_only_own_output_without_advancing_state(self):
+        workflow.prepare(self.result_path)
+        task = self.extracts()[0]
+        save(task["output"], self.evidence(task))
+        before = self.state()
+        command = [sys.executable, str(workflow.ROOT / "podcast-summary.py"), "check",
+                   str(Path(task["input"]).with_name("task.json"))]
+        result = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(json.loads(result.stdout)["ok"])
+        self.assertEqual(self.state(), before)
+        invalid = self.evidence(task)
+        invalid["items"][0]["quote"] = "fabricated quotation"
+        save(task["output"], invalid)
+        result = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(json.loads(result.stdout)["ok"])
+        self.assertEqual(self.state(), before)
+
     def test_source_lookup_returns_only_one_verified_chunk_path(self):
         workflow.prepare(self.result_path)
         self.complete_extracts()
@@ -451,6 +472,32 @@ class WriterAssemblyUnitTests(WorkflowFixture):
         save(self.directory / "body.md", self.body)
         save(self.directory / "coverage.json", self.coverage)
         save(self.directory / "knowledge.draft.json", {"status": "complete", "unit_fixture": True})
+
+    def test_unit_writer_references_are_in_workspace_and_archive_paths_are_not_inputs(self):
+        workspace = Path(self.writer["workspace"])
+        for key in ("report_workflow", "knowledge_workflow"):
+            path = Path(self.payload[key])
+            self.assertTrue(path.is_file())
+            self.assertIn(workspace, path.parents)
+        self.assertEqual(set(self.payload["result"]), {"transcript_path", "segments_path"})
+
+    def test_unit_writer_rejects_invented_timeline_and_unsupported_archive_urls(self):
+        self.write_draft()
+        cases = [(self.body + "\n## Timeline\n[00:00:30] topic\n", "not original segment boundaries"),
+                 (self.body + "\n## Resources\nhttps://example.com/archived-only\n", "Body URL is absent"),
+                 (self.body + "\n## Limitations\nSpelling from Show Notes\n", "Body refers to Show Notes")]
+        for body, error in cases:
+            with self.subTest(error=error):
+                save(self.directory / "body.md", body)
+                with self.assertRaisesRegex(ValueError, error):
+                    workflow.validate_task(self.writer)
+
+    def test_unit_knowledge_evidence_cannot_invent_finer_timestamps(self):
+        self.write_draft()
+        save(self.directory / "knowledge.draft.json", {"insights": [{"evidence": [{
+            "kind": "paraphrase", "quote": "Source", "start": 0, "end": 30}]}]})
+        with self.assertRaisesRegex(ValueError, "original segment boundaries"):
+            workflow.validate_task(self.writer)
 
     def test_unit_assembly_requires_verified_writer_and_preserves_personal_notes(self):
         with self.assertRaisesRegex(ValueError, "incomplete"):

@@ -22,6 +22,8 @@ Do not repeatedly rewrite a growing full summary for every chunk. Merge and dedu
 - Attribute a quotation to a named person only when speaker evidence exists. Otherwise write `说话人未确认`.
 - Do not fabricate missing background facts. Clearly distinguish transcript content from outside context.
 - Treat minimum length as a coverage check, not a target to pad.
+- Use original segment start/end boundaries for report and knowledge timestamps; round to whole seconds when displaying them. Disclose coarse segmentation rather than inventing finer sentence locations.
+- A body resource URL must occur in the transcript segments. Archive-only URLs are inserted by the assembler in Show Notes.
 - Synthesize `内容摘要`, `内容大纲`, `核心观点`, `详细总结`, `关键洞察与证据`, `关键引述`, `背景与术语`, `实用资源`, and `延伸思考与局限` only from the transcript and timestamp segments. Do not use Show Notes as a substitute for listening evidence. Preserve Show Notes only in their archival section.
 - If a term, resource, person, timeline item, or claim exists only in Show Notes and cannot be located in the transcript, omit it from the synthesis sections or explicitly list it inside `Show Notes`; do not silently promote it into the summary.
 

@@ -95,8 +95,9 @@ def add_task(state, generation, task_id, kind, payload):
     task = {"id": task_id, "kind": kind, "status": "pending", "attempts": 0,
             "input": str(directory / "input.json"), "output": str(directory / "output.json"),
             "instruction": str(directory / "task.md"), "input_hash": digest(payload),
-            "estimated_input_tokens": tokens(payload)}
+            "estimated_input_tokens": tokens(payload), "workspace": str(generation)}
     write(task["input"], payload)
+    write(directory / "task.json", task)
     instruction = {
         "extract": "Read only input.json. Read every primary segment; context_segments are context only. Extract ALL major claims, examples, numbers, disagreements, limitations, resources and ambiguities. Return JSON {chunk_id,source_hash,covered_segment_ids,items:[{id,claim,quote,segment_ids,topics,examples,numbers,limitations,ambiguities}]}. Each id is unique within this chunk. quote must be copied verbatim from the referenced primary segments. Lists may be empty when absent. covered_segment_ids must list every primary segment exactly once. Do not infer speaker identities. Keep the serialized output within output_budget UTF-8 bytes; select short supporting quotes while retaining the major topics.",
         "reduce": "Read only input.json. Group the evidence by topic, preserve cases/numbers/disagreements/qualifications. Return JSON {input_hash,items:[{claim,evidence_ids,details}],omitted:[{evidence_id,reason}]}. Each evidence_ids references original leaf IDs. Account for every input leaf ID either in a topic or with an explicit reason for omission. Keep serialized output within output_budget UTF-8 bytes. Never invent evidence or quotations. Include input_hash from task metadata below.",
@@ -106,6 +107,9 @@ def add_task(state, generation, task_id, kind, payload):
     if kind == "write":
         with Path(task["instruction"]).open("a", encoding="utf-8") as stream:
             stream.write("\nDirect quotations belong only in 关键引述, one per line as '- [HH:MM:SS]：verbatim text', at least three. No headings or commentary inside that section. Use paraphrases elsewhere. Retrieve the referenced original chunks to verify each quotation and its timestamp. For knowledge evidence also retrieve the original segments; do not infer timestamps from the thematic reduction.\n")
+            stream.write("\nUse only original segment start/end boundaries for ALL report timestamps, rounded to whole seconds; coarse segments do not authorize sentence-level timestamps. Never read Show Notes or source metadata to populate body/resources or correct spellings. Only include URLs actually spoken/written in source segments. If no actionable resources occur, explain this limitation and discuss the named concepts from the transcript without inventing links. References are copied inside this workspace. Do not inspect validator source code or browse outside this task workspace; use the supplied check command and its diagnostics.\n")
+    with Path(task["instruction"]).open("a", encoding="utf-8") as stream:
+        stream.write(f'\nBefore returning success, run: python3 "{ROOT / "podcast-summary.py"}" check "{directory / "task.json"}"\nThis checks only your task without changing shared coordinator state. If it fails, repair the reported problem and check once more; otherwise return the error. Chinese characters typically occupy three UTF-8 bytes; do not equate characters with bytes. Never claim a successful write is a successful validation.\n')
     state["tasks"][task_id] = task
     return task
 
@@ -169,6 +173,11 @@ def quote_matches(quote, start, end, segments):
     return False
 
 
+def boundary_matches(seconds, segments):
+    return seconds == 0 or any(abs(seconds - float(segment[key])) <= 1.0
+                               for segment in segments for key in ("start", "end"))
+
+
 def validate_task(task):
     payload = read(task["input"])
     if digest(payload) != task["input_hash"]:
@@ -197,14 +206,14 @@ def validate_task(task):
             quote = item.get("quote")
             original = "\n".join(s["text"] for s in payload["segments"] if s["id"] in refs)
             if not isinstance(quote, str) or not quote.strip() or normalized(quote) not in normalized(original):
-                raise ValueError("Quote is absent from referenced source")
+                raise ValueError(f"Quote is absent from referenced source: {item['id']}")
             if not isinstance(item.get("claim"), str) or not item["claim"].strip():
                 raise ValueError("Claim missing")
             for field in ("topics", "examples", "numbers", "limitations", "ambiguities"):
                 if not isinstance(item.get(field), list):
                     raise ValueError(f"Missing evidence list: {field}")
         if tokens(output) > payload["output_budget"]:
-            raise ValueError("Evidence output exceeds budget; shorten quotes and wording")
+            raise ValueError(f"Evidence output exceeds budget: {tokens(output)} UTF-8 bytes > {payload['output_budget']}; shorten quotes and wording")
     else:
         if output.get("input_hash") != task["input_hash"]:
             raise ValueError("Output input_hash mismatch")
@@ -232,6 +241,21 @@ def validate_task(task):
                 if listener().visible_report_chars(sections.get(heading, "")) < minimum:
                     raise ValueError(f"Repair only short/missing section: {heading} (minimum {minimum})")
             segments = read(payload["result"]["segments_path"])
+            body_errors = []
+            source_text = "\n".join(segment["text"] for segment in segments)
+            for url in re.findall(r"https?://[^\s<>\]\)]+", body):
+                if url not in source_text:
+                    body_errors.append(f"Body URL is absent from transcript: {url}")
+            if re.search(r"Show\s*Notes", body, re.I):
+                body_errors.append("Body refers to Show Notes; use transcript evidence only")
+            unavailable = []
+            for stamp in re.findall(r"\b\d{1,3}:\d{2}(?::\d{2})?\b", body):
+                parts = [int(x) for x in stamp.split(":")]
+                seconds = sum(value * 60 ** index for index, value in enumerate(reversed(parts)))
+                if not boundary_matches(seconds, segments):
+                    unavailable.append(stamp)
+            if unavailable:
+                body_errors.append("Report timestamps are not original segment boundaries: " + ", ".join(dict.fromkeys(unavailable)))
             quotation_lines = [line for line in sections.get("关键引述", "").splitlines() if line.strip()]
             if len(quotation_lines) < 3:
                 raise ValueError("At least three source-verified direct quotations required")
@@ -241,7 +265,9 @@ def validate_task(task):
                     raise ValueError("Quote format must be - [HH:MM:SS]：verbatim text")
                 seconds = int(match[1]) * 3600 + int(match[2]) * 60 + int(match[3])
                 if not quote_matches(match[4], seconds, seconds, segments):
-                    raise ValueError("Report quotation does not match original timestamped segments")
+                    body_errors.append(f"Report quotation does not match original timestamped segments: {match[1]}:{match[2]}:{match[3]}")
+            if body_errors:
+                raise ValueError("; ".join(body_errors))
             coverage = read(directory / "coverage.json").get("items", [])
             required = set(payload["leaf_ids"])
             seen = set()
@@ -266,6 +292,8 @@ def validate_task(task):
                 raise ValueError("Knowledge: " + "; ".join(validation["errors"]))
             for insight in read(directory / "knowledge.draft.json").get("insights", []):
                 for item in insight.get("evidence", []):
+                    if not all(boundary_matches(float(item[key]), segments) for key in ("start", "end")):
+                        raise ValueError("Knowledge timestamp must use original segment boundaries")
                     if item.get("kind", "quote") == "quote" and not quote_matches(item["quote"], float(item["start"]), float(item["end"]), segments):
                         raise ValueError("Knowledge direct quote is not verbatim at its source timestamp")
     return output
@@ -376,11 +404,17 @@ def status(result_path):
         else:
             episode = read(result["metadata_path"]).get("episode", {})
             duration = float(episode.get("duration_minutes") or 0)
+            references = generation / "references"
+            references.mkdir(parents=True, exist_ok=True)
+            for name in ("report-workflow.md", "knowledge-workflow.md", "low-context-workflow.md"):
+                shutil.copy2(ROOT / "references" / name, references / name)
             payload = {
-                "entries": prompt_entries(entries), "leaf_ids": leaf_ids, "result": result,
+                "entries": prompt_entries(entries), "leaf_ids": leaf_ids,
+                "result": {key: result[key] for key in ("transcript_path", "segments_path")},
+                "source_type": episode.get("source"),
                 "duration_minutes": duration, "section_minimums": listener().report_section_minimums(duration),
-                "report_workflow": str(ROOT / "references/report-workflow.md"),
-                "knowledge_workflow": str(ROOT / "references/knowledge-workflow.md"),
+                "report_workflow": str(references / "report-workflow.md"),
+                "knowledge_workflow": str(references / "knowledge-workflow.md"),
                 "source_lookup": {"script": str(ROOT / "podcast-summary.py"),
                                   "result": str(Path(result_path).resolve()),
                                   "usage": 'python3 SCRIPT locate RESULT --evidence "extract-NNNN:item-id"'},
@@ -398,7 +432,8 @@ def status(result_path):
     progress = {"generation": state["generation"], "state_path": str(base / "state.json"),
             "status": "assembled" if state["assembled"] else "ready_to_assemble" if all(t["status"] == "complete" for t in current) and current[0]["kind"] == "write" else "awaiting_workers",
             "tasks_total": len(state["tasks"]), "tasks_complete": sum(t["status"] == "complete" for t in state["tasks"].values()),
-            "next_tasks": [{k: t[k] for k in ("id", "kind", "instruction", "attempts", "estimated_input_tokens")} for t in ready],
+            "next_tasks": [{**{k: t[k] for k in ("id", "kind", "instruction", "attempts", "estimated_input_tokens")},
+                            "workspace": t.get("workspace", str(Path(t["input"]).parent.parent))} for t in ready],
             "issues": [{"id": t["id"], "status": t["status"], "error": t.get("error")} for t in current if t.get("error") or t["status"] in {"blocked", "stale"}]}
     write(base / "validation.json", {"checked_at": time.time(), "generation": state["generation"],
                                      "tasks_complete": progress["tasks_complete"], "issues": progress["issues"],

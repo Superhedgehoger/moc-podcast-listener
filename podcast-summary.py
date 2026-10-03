@@ -4,13 +4,13 @@ import argparse
 import json
 import sys
 
-from summary_workflow import prepare, status, assemble, task_event, locate
+from summary_workflow import prepare, status, assemble, task_event, locate, read, validate_task
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("prepare", "status", "assemble", "start", "fail", "locate"))
-    parser.add_argument("result", help="Absolute path to result.json")
+    parser.add_argument("command", choices=("prepare", "status", "assemble", "start", "fail", "locate", "check"))
+    parser.add_argument("result", help="Absolute path to result.json (task.json for check)")
     parser.add_argument("--task")
     parser.add_argument("--evidence")
     parser.add_argument("--reason", default="")
@@ -19,7 +19,11 @@ def main():
     parser.add_argument("--model")
     args = parser.parse_args()
     try:
-        if args.command == "prepare":
+        if args.command == "check":
+            task = read(args.result)
+            validate_task(task)
+            value = {"ok": True, "task": task["id"]}
+        elif args.command == "prepare":
             value = prepare(args.result, args.target_tokens, args.synthesis_tokens, args.model)
         elif args.command == "locate":
             if not args.evidence:

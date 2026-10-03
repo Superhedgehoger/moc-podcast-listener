@@ -480,6 +480,10 @@ class WriterAssemblyUnitTests(WorkflowFixture):
             self.assertTrue(path.is_file())
             self.assertIn(workspace, path.parents)
         self.assertEqual(set(self.payload["result"]), {"transcript_path", "segments_path"})
+        instruction = Path(self.writer["instruction"]).read_text(encoding="utf-8")
+        self.assertIn("for the local validator ONLY", instruction)
+        self.assertIn("Obtain source text solely via source_lookup", instruction)
+        self.assertIn("make targeted file edits", instruction)
 
     def test_unit_writer_rejects_invented_timeline_and_unsupported_archive_urls(self):
         self.write_draft()

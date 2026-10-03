@@ -1,6 +1,6 @@
 # v4.17.0 验证记录 / Validation Record
 
-日期：2026-10-03。状态：本地实现与离线验证完成；真实证据提取通过，详细报告尚未通过；正式发布待完成。
+日期：2026-10-04。状态：本地实现与离线验证完成；短播客真实提取、写作、装配与最终文件核验通过；效率与长内容实测尚未达标，正式发布待完成。
 
 ## 已验证
 
@@ -43,18 +43,28 @@
 | 提取 | 2 | 210.01 | 测试进程超时，留下的输出仍未通过检查 |
 | 提取 | 3 | 204.91 | 子任务自检及主流程检查通过，3 个原始 segments 全覆盖 |
 | 写作 | 1 | 462.61 | 草稿存在，但原话混入解释文字，拒绝完成 |
+| 写作 | 2 | 216.50 | 更新正文但未提交完整结果；触发上下文压缩，拒绝完成 |
+| 写作 | 3 | 559.43 | 完整结果、自检、主流程检查、装配和最终文件核验通过 |
 
 三个完整响应分别报告累计 token 用量 51828、314150、916534（包含缓存读取和多轮请求）。这些是整个代理调用的累计用量，不能解释为单次上下文大小；第二次超时没有完整用量记录。日志里的 cost=0 也不能据此宣称服务免费。
 
 写作草稿的人工检查还发现了编造细时间点、使用 Show Notes 独有链接，以及在过窄工作目录中读取外部参考文档受限。已经修复工作目录、最小写作输入、参考文档位置、自检和相应质量检查；修复后的写作输入估算从 9061 降为 6610。
 
-恢复第二次写作调用时，自动审批再次拒绝，称未识别明确关联测试内容和 Agnes 目的地的用户授权。进程没有启动，未增加写作尝试次数。已向用户请求审查系统可识别的完整授权表述，未绕过该拒绝。
+恢复第二次写作调用时，自动审批再次拒绝，称未识别明确关联测试内容和 Agnes 目的地的用户授权。进程没有启动，未增加写作尝试次数。2026-10-04 用户完整授权了《灵动岛》的转录片段、证据和草稿发送至 Agnes 后，第二、第三次调用均成功启动；未绕过审批或重置次数。
 
-因此真实提取已通过，真实写作、最终装配和完整质量核验尚未通过。没有把失败草稿发布成正式报告。长访谈和学习型长播客目前仅做了结构检查，正式课程、256K 窗口及真实并发 2 仍未验证。
+第二次写作日志暴露了模型试图读取工作目录外的 segments 文件，以及约 51576 估算上下文超过本机 49152 预留后的预算。宿主自动压缩后正常退出，但未生成完成标记；不把退出码 0 当作成功。已增加“result 源文件路径仅供本地校验、模型通过证据 ID 定位工作目录内原文”的明确限制和回归断言，107 项测试再次通过。
+
+第二、第三次写作累计用量分别为 312616、1464335 tokens（包括缓存和多轮请求）；第三次共 62 轮交互。单任务输入仅估算 6610，但总交互成本仍高，不能据此宣称低上下文、高效率目标已经全部实现。尚缺逐请求峰值上下文记录；本机实际配置为 64K，不把标称 128K 当作实际 128K 配置测试。
+
+第三次写作产物通过真实装配器与 `--require-report` 最终核验，错误为零。8 条洞察、11 项知识证据、3 条直接引述均通过机械检查；3 张历史归档图片在报告中使用存在的相对链接，原文 URL 保存在 Show Notes，未伪称重新下载图片或保存网页快照。本次使用复制的旧转录，不是重新转录音频。测试 result 无 job_id，证明的是文件最终核验，不是实际后台作业状态转为 completed。
+
+人工对照原始三段检查：词义双关、1972 年论文与柏林墙案例、上海封城回响、飞地与功能筛选、刘海与全面屏、消费新旧关系、集体幻想、技术与欲望的矛盾均覆盖。正文保留 ASR 歧义披露，但“上期转写”措辞不准确，术语区的英文规范化与原样保留声明也不完全一致；这些是仍需改进的语义质量问题，不能仅凭机械通过宣称完美。说话人未确认的警告保留，没有编造身份。
+
+长访谈和学习型长播客目前仅做了结构检查，正式课程、256K 窗口及真实并发 2 仍未验证。本次授权限定《灵动岛》，未向该外部模型发送其他节目。
 
 ## 发布闸门
 
-待自动审批接受完整授权后，复用已核验的证据继续第二次写作，保留首次写作尝试次数与旧草稿。完成写作、装配和最终核验后继续扩大样本验证；256K 若仍不可用则标注未测。还需真实课程样本验证。
+短播客文件流程已完成，接下来需要降低写作多轮交互开销、加强术语推测与语义复核，再扩大长访谈及课程样本验证。256K 若仍不可用则标注未测。不得通过清除次数重新启动本次已达三次的提取或写作任务。
 
 安装前备份已于 2026-10-03 23:46 完成，备份名 `moc-pocast-listener-before-v4.17.0-20261003-234609`，共 356 个文件，含 SHA-256 清单和本机额外排查笔记。
 
@@ -62,4 +72,4 @@
 
 ## English Summary
 
-Local implementation and 107 offline tests pass. Three copied historical transcripts passed bounded-input and segment-coverage checks. Live Agnes extraction passed on its third attempt; the first writer produced a draft that failed citation checks and exposed invented fine timestamps and archive-only URLs. Worker workspace, copied references, minimal inputs and quality checks were fixed. Automatic approval blocked the second writer launch despite the earlier confirmation; no new attempt was consumed. End-to-end report quality, 256K, formal-course behavior and real concurrency two remain unverified. Installation and GitHub release remain gated on the remaining validation.
+Local implementation and 107 offline tests pass. With explicit episode-specific authorization, live Agnes extraction and writing each passed on their third start. The copied short episode passed assembly and final artifact verification, preserving three archived images and online links. It has no tracked job ID and was not newly transcribed. The final writer took 559 seconds and 62 turns with 1,464,335 cumulative tokens including cache reads; bounded initial input does not establish efficient total context use. Semantic review found minor wording and terminology caveats. Long-content quality, formal courses, actual 128K/256K configurations, tracked-job completion and real concurrency two remain unverified. Installation and GitHub release remain gated on the remaining validation.

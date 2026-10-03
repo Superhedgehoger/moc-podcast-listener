@@ -1,5 +1,12 @@
 # 更新日志 (Changelog)
 
+## v4.17.0
+- 新转录结果启用 `summary_workflow_version=1`：主会话只调度 `prepare/status/start/fail/assemble`，不读取整篇转录或全部证据。
+- 宿主用 `sessions_spawn` 或等价独立会话能力，以当前模型、最多并发 2 个执行证据提取、分层归并和最终写作；脚本不调用模型 API。
+- 速读概览与详细报告并存，保留九个正文区、逐区覆盖门槛、案例/数字/局限和证据覆盖记录；Show Notes 仅作归档，个人笔记不被覆盖。
+- 新结果最终核验额外调用 `validate_workflow`；无版本字段的历史结果继续兼容。音频和 WAV 默认保留，`KEEP_AUDIO=0` 显式请求清理。
+- Added Chinese/English upgrade and recovery guidance. Simulated/fixture checks are explicitly distinct from live host/model validation; this entry does not claim a live end-to-end run or a published release.
+
 ## v4.16.0 (2026-08-30)
 - 所有链接解析后先探测官方 Transcript；可用且通过完整性检查时直接保存和使用，跳过音频下载与本地 ASR
 - YouTube 与 Bilibili 新增平台字幕发现，人工字幕优先于自动字幕；即使没有可用纯音频格式，只要字幕可用仍可完成转录

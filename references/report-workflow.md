@@ -4,21 +4,17 @@ Use this reference when generating the final podcast or course-lesson report.
 
 ## Evidence extraction
 
-For a transcript longer than 30,000 Chinese characters, run:
-
-```bash
-python3 "<skill-directory>/chunk_transcript.py" "TRANSCRIPT_PATH"
-```
+Use [low-context-workflow.md](low-context-workflow.md) for all new summaries, regardless of transcript length. The main session coordinates disk-backed tasks, never the whole transcript. The host starts independent workers with `sessions_spawn` or an equivalent mechanism (current model, concurrency 2). Extraction workers read only their assigned inputs; the writer receives bounded evidence and may retrieve specific source chunks when needed.
 
 For every chunk, independently extract:
 
 - Topics and claims
 - Supporting examples, numbers, named entities, and limitations
-- Quotations copied exactly, with timestamps when available
+- Quotations copied exactly with verified timestamps; untimed sources need alignment before workflow v1 can continue
 - Books, articles, music, films, podcasts, tools, products, people, and concepts
 - Open questions or ambiguous passages
 
-Do not repeatedly rewrite a growing full summary for every chunk. Merge the chunk evidence, deduplicate it, then perform one synthesis pass. Run an independent review only for transcripts longer than 60 minutes, high-stakes subject matter, or when the user explicitly requests deep review.
+Do not repeatedly rewrite a growing full summary for every chunk. Merge and deduplicate evidence through bounded reduction tasks, then perform one writing task. Keep original evidence IDs, cases, numbers, disagreements and limitations; record a report section or explicit omission reason for every leaf evidence ID in `coverage.json`. Run an independent review only for transcripts longer than 60 minutes, high-stakes subject matter, or when the user explicitly requests deep review. Such review is separate from the mandatory deterministic final verification.
 
 ## Quality rules
 
@@ -26,19 +22,16 @@ Do not repeatedly rewrite a growing full summary for every chunk. Merge the chun
 - Attribute a quotation to a named person only when speaker evidence exists. Otherwise write `说话人未确认`.
 - Do not fabricate missing background facts. Clearly distinguish transcript content from outside context.
 - Treat minimum length as a coverage check, not a target to pad.
+- Synthesize `内容摘要`, `内容大纲`, `核心观点`, `详细总结`, `关键洞察与证据`, `关键引述`, `背景与术语`, `实用资源`, and `延伸思考与局限` only from the transcript and timestamp segments. Do not use Show Notes as a substitute for listening evidence. Preserve Show Notes only in their archival section.
+- If a term, resource, person, timeline item, or claim exists only in Show Notes and cannot be located in the transcript, omit it from the synthesis sections or explicitly list it inside `Show Notes`; do not silently promote it into the summary.
 
-Suggested minimum summary-body length:
-
-| Duration | Minimum |
-| --- | ---: |
-| Under 30 minutes | 1,200 Chinese characters |
-| 30-60 minutes | 2,000 Chinese characters |
-| 60-90 minutes | 3,000 Chinese characters |
-| Over 90 minutes | 4,000 Chinese characters |
+The single source of section requirements is `report_section_minimums(duration)` in `podcast-listener.py`. The coordinator inserts that dictionary as `section_minimums` in the writer input; generation and validation use the same values. Meet each section requirement, not merely an aggregate word count. Preserve source detail without inventing examples to reach a minimum.
 
 ## Output
 
 Write the final report to the target path in the generated Agent instruction:
+
+In workflow v1, the independent writer writes only the nine synthesis sections to `body.md`, plus `knowledge.draft.json`, `coverage.json`, and `output.json` beside its task output. Follow `section_minimums` in the task input. `内容摘要` is the quick overview, not a replacement for `详细总结` or the other sections. `assemble` owns the title, local completion date, basic information, archived Show Notes, relative-link rebasing and transcript footer. It publishes the final report and knowledge file; do not edit those published files directly. The core blocks untimed transcripts: preserve official text, obtain reliable timestamp alignment, then prepare again. Never invent timestamps or present this blocked path as validated.
 
 For `local_media` or a user-identified course lesson, use a course-oriented
 title and organize the body around learning objectives, concepts, procedures,
@@ -63,19 +56,31 @@ quotation, timestamp, artifact-link, and verification requirements.
 
 ## 内容大纲
 
+Build a chronological outline from transcript/segments. Do not copy the Show Notes timeline.
+
+## 内容摘要
+
+Summarize the episode's actual argument, examples, and progression from the transcript.
+
 ## 核心观点
 
 Each major point must include its evidence, example, or reasoning and any relevant limitation.
 
+## 详细总结
+
+Develop the main argument in depth from transcript evidence. Cover mechanisms,
+examples, disagreements, transitions, and qualifications rather than repeating
+the title or Show Notes description.
+
 ## 关键洞察与证据
 
-List the most reusable claims. For each one, include a checked quotation or an
+List the most reusable claims. For each one, include an
 explicitly labeled paraphrase, its timestamp range, speaker status, and
 confidence. Keep this section synchronized with `knowledge.json`.
 
 ## 关键引述
 
-Use exact transcript wording. Add `[HH:MM:SS]` when available and do not guess the speaker.
+At least three lines, strictly `- [HH:MM:SS]：verbatim text`, checked against original timestamped segments. No commentary or subheadings inside this section; use paraphrases in other body sections. Do not guess speakers or fabricate timestamps.
 
 ## 背景与术语
 

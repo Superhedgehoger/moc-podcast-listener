@@ -5,7 +5,7 @@ description: Download and transcribe podcast episodes, course lessons, local med
 
 # Podcast Listener
 
-Use the bundled scripts for deterministic retrieval, transcription, Show Notes archiving, and transcript chunking. Perform synthesis in the current agent after the scripts finish.
+Use the bundled scripts for deterministic retrieval, transcription, Show Notes archiving, and disk-backed summary tasks. The main session coordinates independent host workers using the current model; it never reads the whole transcript or performs whole-transcript synthesis.
 
 ## Run
 
@@ -28,7 +28,7 @@ items as `待总结`, `已完成`, `仅归档`, or `资料不完整`. Completed 
 ordered by report verification time; pending items are ordered by transcription
 time. Do not use the episode publication date as the catalog sort key.
 
-YouTube and Bilibili resolution must select an audio-only `yt-dlp` format. Do not fall back to a combined video format. Local course files may be audio or video; video input is converted with `ffmpeg -vn` so only its first audio track enters ASR. Process a multi-lesson course as one task per lesson so retries and reports remain independent. Intermediate audio is removed unless the user requests `--keep-audio`.
+YouTube and Bilibili resolution must select an audio-only `yt-dlp` format. Do not fall back to a combined video format. Local course files may be audio or video; video input is converted with `ffmpeg -vn` so only its first audio track enters ASR. Process a multi-lesson course as one task per lesson so retries and reports remain independent. Preserve downloaded source audio and WAV by default for human review and retranscription. The user normally deletes audio manually. Pass `--keep-audio` explicitly when invoking through older wrappers; `KEEP_AUDIO=0` opts out only when the user explicitly requests cleanup. If the user requests cleanup of the previous run, limit it to uniquely identified audio from that same episode and only after replacement transcription succeeds; do not delete other episodes or the last usable source before a retry succeeds.
 
 Use fast modes when a full ASR run is unnecessary:
 
@@ -50,7 +50,7 @@ Use these environment variables only when needed:
 - `ASR_ENGINE`: Choose `sensevoice`, `whisper`, or `stitch`.
 - `WHISPER_MODEL`: Choose the Whisper model; default `large-v3`.
 - `COURSE_AUDIO_BITRATE`: AAC bitrate used when extracting local course video audio; default `128k`.
-- `KEEP_AUDIO=1`: Preserve downloaded audio and WAV files.
+- `KEEP_AUDIO=1`: Preserve downloaded audio and WAV files (default). `KEEP_AUDIO=0` requests cleanup of audio created by the current run; use only with explicit user authorization.
 - `FORCE_TRANSCRIBE=1`: Ignore a matching cached transcript.
 - `SHOWNOTES_ASSETS`: Choose `hybrid`, `online`, `local`, or `off`; default `hybrid`.
 - `SHOWNOTES_MAX_IMAGES`: Maximum images downloaded per episode; default `40`.
@@ -69,14 +69,18 @@ Read [references/storage-and-speakers.md](references/storage-and-speakers.md) wh
 
 ## Summarize
 
-Read [references/report-workflow.md](references/report-workflow.md) and [references/knowledge-workflow.md](references/knowledge-workflow.md) before producing a report.
+Read [references/low-context-workflow.md](references/low-context-workflow.md) to coordinate all new summaries. New results carry `summary_workflow_version=1`. Run `podcast-summary.py prepare/status/start/fail/assemble` as described there. Dispatch task instruction paths through host `sessions_spawn` or an equivalent independent-session mechanism, at concurrency 2 using the current model. Scripts do not perform inference. Without independent workers, report the blocker; do not summarize the whole transcript in the main session.
+
+The independent writer reads [references/report-workflow.md](references/report-workflow.md) and [references/knowledge-workflow.md](references/knowledge-workflow.md). Keep a quick overview in `内容摘要` and retain every detailed report section; smaller context does not mean a shorter report.
 
 - For a course lesson, preserve the same evidence and citation requirements, but organize the report around learning objectives, concepts, demonstrations, procedures, assignments, and unresolved questions rather than pretending it is a podcast interview.
 
-- For transcripts up to 30,000 Chinese characters, synthesize directly from the transcript and timestamp segments.
-- For longer transcripts, run `chunk_transcript.py` and perform independent evidence extraction per chunk, followed by one reduce/synthesis pass.
+- The following report sections must be synthesized only from the standalone transcript and timestamp segments: `内容摘要`, `内容大纲`, `核心观点`, `详细总结`, `关键洞察与证据`, `关键引述`, `背景与术语`, `实用资源`, and `延伸思考与局限`. Show Notes are archival material only: preserve them in `Show Notes`, but never use Show Notes-only wording, claims, resources, or timeline entries as evidence for those synthesis sections. A fact that appears in both Show Notes and the transcript may be used only after checking it against the transcript.
+
+- Use bounded segment-based extraction for every transcript length, hierarchical reduction when needed, then one independent writing task. Keep evidence, coverage, and state on disk; return only paths and compact status to the coordinator.
 - Never infer a real speaker name from an unlabelled transcript or an anonymous `SPEAKER_00` label. Use `说话人未确认` when identity is not supported.
-- Attach timestamps to quotations whenever segment data is available.
+- Workflow v1 requires timestamped segments. Untimed transcripts need reliable alignment before summary; retain the official text and report the blocker, never fabricate seconds. An indivisible segment exceeding the input budget is also an actionable error, not permission to truncate it.
+- In `关键引述`, use at least three exact source lines in the form `- [HH:MM:SS]：verbatim text`, with no commentary or subheadings in that section. Use paraphrases elsewhere and verify quotations/timestamps against original segments.
 - Preserve the archived Show Notes content and online links in the final report. Rebase only local relative asset paths from the Show Notes file location to the report location so archived images remain valid in both files.
 - Keep every Show Notes hyperlink in the managed `链接归档` section of `shownotes.md` and in `media-manifest.json`. Preserve the original online URL even when a local snapshot succeeds or fails; do not imply that an online URL alone is a saved webpage.
 - Keep the transcript as a separate source document. In the report, describe it and link the transcript, segments JSON, SRT, WebVTT, and archived chapter JSON when present, using paths relative to the report; never embed the complete transcript.
@@ -106,10 +110,11 @@ Before returning:
 1. Confirm the report file exists at `report_path` from `result.json`.
 2. Confirm required sections from the report workflow are present.
 3. Confirm the report begins with a valid `转录总结日期`, contains `关键洞察与证据`, completes `knowledge.json`, and check quotations against transcript text and timestamp segments.
-4. Count summary body characters without Show Notes.
-5. Confirm the report's transcript, segments, SRT, WebVTT, optional chapter links, and every Show Notes online link are preserved.
-6. Report any unavailable images, links, speaker identities, or transcription gaps explicitly.
-7. Run the verification command written in `_Agent任务指令.txt`, normally:
+4. Count every required synthesis section separately and count the total summary body without Show Notes. Reject short template sections even when the total report is long.
+5. Reject any long Show Notes passage copied into a synthesis section when that passage does not occur in the transcript.
+6. Confirm the report's transcript, segments, SRT, WebVTT, optional chapter links, and every Show Notes online link are preserved.
+7. Report any unavailable images, links, speaker identities, or transcription gaps explicitly.
+8. Run the verification command written in `_Agent任务指令.txt`, normally:
 
 ```bash
 python3 "<skill-directory>/podcast-listener.py" \
@@ -117,6 +122,8 @@ python3 "<skill-directory>/podcast-listener.py" \
 ```
 
 Return success only after `status.json` reports `completed`. A status of `awaiting_report` means transcription is done but the requested report or structured evidence is not complete.
+
+Final `--require-report` verification additionally calls `validate_workflow` only for results opted in with `summary_workflow_version=1`. Historical results without this field retain existing artifact verification and do not require summary state. Simulation/fixture checks are not live host/model validation; label the two separately.
 
 ## Transcript format
 

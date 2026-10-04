@@ -5,6 +5,8 @@
 - 宿主用 `sessions_spawn` 或等价独立会话能力，以当前模型、最多并发 2 个执行证据提取、分层归并和最终写作；脚本不调用模型 API。
 - 速读概览与详细报告并存，保留九个正文区、逐区覆盖门槛、案例/数字/局限和证据覆盖记录；Show Notes 仅作归档，个人笔记不被覆盖。
 - 新结果最终核验额外调用 `validate_workflow`；无版本字段的历史结果继续兼容。音频和 WAV 默认保留，`KEEP_AUDIO=0` 显式请求清理。
+- 修复后台完成闸门：只有显式 `--require-report` 且最终核验通过才完成作业，普通文件检查不能绕过总结流程核验。
+- 新增可选 OpenClaw 单次结构化返回适配器，由宿主启动独立会话、脚本落盘并沿用证据校验，减少反复文件编辑；效率验证状态见验证记录。
 - Added Chinese/English upgrade and recovery guidance. Simulated/fixture checks are explicitly distinct from live host/model validation; this entry does not claim a live end-to-end run or a published release.
 
 ## v4.16.0 (2026-08-30)

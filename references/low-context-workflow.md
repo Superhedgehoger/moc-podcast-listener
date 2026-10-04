@@ -44,6 +44,14 @@ Each generated worker instruction includes `podcast-summary.py check TASK_JSON`.
 
 For a host that cannot give spawned sessions the required working root, an isolated `openclaw agent exec` is an equivalent worker. Use `--cwd WORKSPACE --message-file INSTRUCTION --model CURRENT_MODEL --json --timeout 600`, with the exact current model obtained from the host. Keep concurrency at two; serialize state commands. Verify that the process has stopped before retrying. A test harness must stop its own process group on timeout, not just the launcher. Do not change global OpenClaw configuration merely to dispatch a worker.
 
+### Optional Single-Response Adapter / 可选单次返回适配器
+
+To avoid long file-editing loops, the host can dispatch `scripts/openclaw_summary_worker.py TASK_JSON --model CURRENT_MODEL`. Start the task first; the coordinator updates that task's `task.json` automatically. This adapter starts one isolated OpenClaw invocation, asks for structured JSON without tool calls, writes the result atomically and uses the same task validator. It never alters coordinator counters or changes the model/provider; the reported model must match the requested one. The coordinator still runs `status`, handles errors and enforces the two-worker/three-start limits. No provider SDK or additional API key is introduced.
+
+The extraction evidence remains bounded by the normal 8K chunk budget; the complete adapter message has a conservative 10K UTF-8-byte ceiling including instructions. Reduce/write messages have a 24K ceiling including schema and source excerpts. Local scripts retrieve source-backed quotation examples and evidence boundaries without loading the full transcript into the worker. `worker-run.json` records input estimates, elapsed time, model, usage and validation failures inside the task directory. Cumulative usage is not peak context. The adapter is optional until live efficiency validation passes; ordinary independent workers remain supported.
+
+`--config PATH` optionally selects an already-approved isolated OpenClaw invocation config, for example one denying all tools for structured-only inference. Do not copy credentials into public source, commit the config, relax the existing sandbox, or modify global settings to use this adapter. Its timeout terminates only its own process group. Invalid JSON or failed quality checks never mean completion.
+
 ## Recovery / 恢复
 
 State and outputs survive context loss. Resume with `status`; rerunning `prepare` with the same source and settings reuses its generation. Wait for known running workers instead of launching duplicates. If a worker failed, dispatch failed, or a session was lost, first confirm the old worker has stopped, then record failure:

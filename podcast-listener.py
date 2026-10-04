@@ -4908,7 +4908,7 @@ def run_verify(output_dir: Path, target: str, *, require_report: bool) -> int:
         json.dumps(verification, ensure_ascii=False, indent=2) + "\n",
     )
     verification["verification_path"] = str(verification_path)
-    if verification["ok"] and verification["report_present"] and job_path and job_path.is_file():
+    if require_report and verification["ok"] and verification["report_present"] and job_path and job_path.is_file():
         tracker = JobTracker(job_path.parent, read_json_object(job_path), resumed=True)
         tracker.mark_report_complete()
     if verification["ok"]:

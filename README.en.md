@@ -76,6 +76,13 @@ all nine detailed sections and their coverage floors remain required. Show Notes
 are assembled as archival material, never used as summary evidence. Personal
 notes remain protected.
 
+An optional [single-response OpenClaw adapter](scripts/openclaw_summary_worker.py)
+returns structured JSON and lets the host write files, avoiding repeated model
+file edits. Start the task first, then pass its `task.json` and the exact current
+model. It uses the same validators and retry limits; live efficiency measurements
+are recorded separately. Artifact-only verification cannot complete a job:
+`--require-report` is mandatory for that transition.
+
 Upgrade the scripts and references together. New opted-in results require
 `validate_workflow` during final report verification. Older results without the
 field keep existing verification and need no workflow state, retranscription or

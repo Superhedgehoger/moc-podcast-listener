@@ -85,6 +85,17 @@ class WorkflowFixture(unittest.TestCase):
 
 
 class SummaryWorkflowTests(WorkflowFixture):
+    def test_task_metadata_tracks_coordinator_start_and_failure(self):
+        workflow.prepare(self.result_path)
+        task = self.extracts()[0]
+        path = Path(task["input"]).with_name("task.json")
+        workflow.task_event(self.result_path, task["id"], "start")
+        self.assertEqual(read(path)["status"], "running")
+        self.assertEqual(read(path)["attempts"], 1)
+        workflow.task_event(self.result_path, task["id"], "fail", "worker stopped")
+        self.assertEqual(read(path)["status"], "pending")
+        self.assertEqual(read(path)["error"], "worker stopped")
+
     def test_worker_check_validates_only_own_output_without_advancing_state(self):
         workflow.prepare(self.result_path)
         task = self.extracts()[0]

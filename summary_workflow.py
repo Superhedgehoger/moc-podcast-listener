@@ -473,6 +473,7 @@ def task_event(result_path, task_id, event, reason=""):
     else:
         raise ValueError("Unknown task event")
     persist(base, state)
+    write(Path(task["input"]).with_name("task.json"), task)
     return {"id": task_id, "status": task["status"], "attempts": task["attempts"]}
 
 

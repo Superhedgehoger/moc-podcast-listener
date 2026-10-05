@@ -54,6 +54,8 @@ Writer repair uses only rejected/short sections, rather than copying the entire 
 
 `--config PATH` optionally selects an already-approved isolated OpenClaw invocation config, for example one denying all tools for structured-only inference. Do not copy credentials into public source, commit the config, relax the existing sandbox, or modify global settings to use this adapter. Its timeout terminates only its own process group. Invalid JSON or failed quality checks never mean completion.
 
+Recent OpenClaw versions use per-model `models.providers.<provider>.models[].contextTokens`; a legacy `agents.defaults.contextTokens` setting may be removed during config loading. Verify warnings and effective limits before claiming a particular window was tested. Check the message/workspace budget before `start`, so local setup errors do not repeatedly consume model dispatch attempts. Legacy task metadata without `workspace` resolves to its generation directory; counters and previous failures remain unchanged.
+
 ## Recovery / 恢复
 
 State and outputs survive context loss. Resume with `status`; rerunning `prepare` with the same source and settings reuses its generation. Wait for known running workers instead of launching duplicates. If a worker failed, dispatch failed, or a session was lost, first confirm the old worker has stopped, then record failure:

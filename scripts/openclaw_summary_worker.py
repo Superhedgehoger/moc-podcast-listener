@@ -89,6 +89,10 @@ def build_prompt(task):
     if task["kind"] in {"extract", "reduce"}:
         instruction = Path(task["instruction"]).read_text(encoding="utf-8").split("\n\nInput:")[0]
         prompt = common + instruction + "\nNo file writes: return the output object instead; the host saves and verifies it.\n"
+        if task["kind"] == "extract":
+            prompt += ("Each quote must be ONE contiguous substring of ONE primary segment. "
+                       "Never concatenate separate phrases, omit intervening words, or clean punctuation/spelling. "
+                       "Claim and segment_ids may combine several segments, but choose one short unmodified quotation.\n")
         prompt += "\nTASK METADATA: " + json.dumps({"input_hash": task["input_hash"]})
     else:
         sources = writer_sources(payload)
@@ -173,19 +177,26 @@ def save_response(task, response):
     validate_task(task)
 
 
+def preflight(task):
+    workspace = task.get("workspace") or str(Path(task["input"]).parent.parent)
+    if not Path(workspace).is_dir():
+        raise ValueError("Worker workspace does not exist")
+    prompt = build_prompt(task)
+    budget = 10000 if task["kind"] == "extract" else 24000
+    estimate = len(prompt.encode("utf-8"))
+    if estimate > budget:
+        raise ValueError(f"Worker prompt estimate {estimate} exceeds {budget}; reduce task input")
+    return workspace, prompt, estimate
+
+
 def run(task_path, model, config=None, timeout=600):
     task = read(task_path)
     if task.get("status") != "running":
         raise ValueError("Coordinator must start the task and refresh task.json before dispatch")
-    prompt = build_prompt(task)
-    budget = 10000 if task["kind"] == "extract" else 24000
-    # Count the complete host message, not just raw evidence.
-    estimate = len(prompt.encode("utf-8"))
-    if estimate > budget:
-        raise ValueError(f"Worker prompt estimate {estimate} exceeds {budget}; reduce task input")
+    workspace, prompt, estimate = preflight(task)
     directory = Path(task["output"]).parent
     write(directory / "one-shot-request.txt", prompt)
-    command = ["openclaw", "agent", "exec", "--cwd", task["workspace"], "--model", model,
+    command = ["openclaw", "agent", "exec", "--cwd", workspace, "--model", model,
                "--message-file", str(directory / "one-shot-request.txt"), "--json", "--timeout", str(timeout)]
     if config:
         command += ["--config", str(config)]

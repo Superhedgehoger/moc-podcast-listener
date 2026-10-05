@@ -13,6 +13,25 @@ spec.loader.exec_module(worker)
 
 
 class WorkerAdapterTests(unittest.TestCase):
+    def test_preflight_accepts_legacy_workspace_without_launching_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            generation = Path(tmp) / "generation"
+            directory = generation / "extract-0000"
+            directory.mkdir(parents=True)
+            task = {"kind": "extract", "input": str(directory / "input.json")}
+            with patch.object(worker, "build_prompt", return_value="bounded prompt"):
+                workspace, _, estimate = worker.preflight(task)
+            self.assertEqual(Path(workspace), generation)
+            self.assertEqual(estimate, len("bounded prompt"))
+            self.assertNotIn("workspace", task)
+
+    def test_preflight_rejects_over_budget_before_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            task = {"kind": "extract", "input": str(Path(tmp) / "task/input.json")}
+            with patch.object(worker, "build_prompt", return_value="x" * 10001):
+                with self.assertRaisesRegex(ValueError, "exceeds 10000"):
+                    worker.preflight(task)
+
     def test_section_repair_preserves_other_sections_and_rejects_injection(self):
         body = "## A\n\nOld A\n\n## B\n\nPreserve B exactly.\n"
         changed = worker.replace_sections(body, {"A": "New A"}, {"A": 1, "B": 1})

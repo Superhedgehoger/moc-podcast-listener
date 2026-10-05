@@ -1,10 +1,10 @@
 # v4.17.0 验证记录 / Validation Record
 
-日期：2026-10-05。状态：119 项离线测试通过；短播客真实文件流程通过；真实 JobTracker 本地闸门通过集成测试；合成材料的双任务提取实测通过，但轻量写作未达章节要求并已停止。长内容外发审批与课程样本仍缺，正式发布待完成。
+日期：2026-10-05。状态：122 项离线测试通过；短播客真实文件流程与本地状态闸门通过；长内容已获外发授权，但实测失败并停止，课程样本路径仍缺。已纠正 128K 设置被宿主忽略的错误结论，正式发布待完成。
 
 ## 已验证
 
-- 当前 119 项离线测试通过，包括原有回归测试。
+- 当前 122 项离线测试通过，包括原有回归测试。
 - 完整 segments 分块、元数据预算、稳定 ID、重叠不重复计入正文证据。
 - 引述原文及时间定位、数字小数点不能被归一化吞掉、重复原话的时间定位。
 - 24K 预算触发分层、原始证据 ID 保留、缺失覆盖与无理由遗漏拒绝。
@@ -66,6 +66,18 @@
 
 ### 本轮续测进展
 
+#### 明确授权后的真实长内容测试
+
+用户明确授权两集内容发送至 `agnes-ai/agnes-3.0-flash` 后，自动审批接受了调用。
+
+- 《平原上的摩西》的旧测试记录缺少 workspace 字段；前两块在调用模型前因本地元数据错误各失败三次。没有转录因此外发，没有将启动错误伪称模型失败。旧计数和失败记录保留，已请求允许另建隔离测试副本，而未自动清空计数。
+- 适配器已兼容旧 workspace 元数据；测试调度先检查工作目录与提示预算，再增加启动次数，防止循环消耗本地初始化失败。新增两项回归测试通过。
+- 《纵横四海 EP86》真实运行了前两块、全局双并发、指定 Agnes 模型。第一轮均因引述不匹配失败；第二轮分别因引述不匹配和输出 8859 字节超过 6000 上限失败；第三轮分别因另一引述不匹配及不完整 JSON 失败。两块均为 blocked，其他 100 块未继续调用，未组装/发布摘要，也未覆盖原资料。
+- 诊断发现返回引述拼接了不相邻原话；增加单段连续引述指引，并修复程序只能检查“被选片段拼接文本”的缺陷。新检查同时要求引述存在于完整 primary 原文中，拒绝通过省略中间内容拼出假原话。新增回归用例通过。
+- 第三轮的 JSON 响应在数组中途结束，响应仍报告 ok、stopReason=stop；这不能证明具体 provider 故障原因，但证明必须做结构校验，退出/响应状态不可当成完成。没有猜补缺失 JSON 或伪造证据。
+- 反查运行日志发现所有此前测试设置的 legacy `agents.defaults.contextTokens` 被宿主删除。已更正本记录和临时配置构造，改用 Agnes 3.0 Flash 模型条目的 `contextTokens=131072`。未清空失败计数重跑，因此有效 128K 实测依然待完成。
+- 正式课程的实际目录路径仍未提供；用户授权句中的“并提供课程样本目录”不是路径，已单独询问。两集外发授权现在已具备，不应再次误报为缺授权。
+
 2026-10-05 另用本地新编的六段虚构软件测试材料完成允许范围内的真实宿主检查，不含任何用户播客/课程内容，不绕过真实长访谈外发拒绝。
 
 | 合成材料阶段 | 启动次数 | 耗时 | 结果 |
@@ -76,7 +88,7 @@
 | 写作局部修复 | 2 | 本地拦截 | 携带整份旧稿时估算 25265 超过 24K，未调用模型，未重置次数 |
 | 写作局部修复 | 3 | 137.08 秒 | 只携带待修复章节，仍未达摘要门槛；2 轮交互、累计 9427 tokens，最终 blocked |
 
-两项提取实际并发调度并完成，完整提示估算分别为 8273、6292。采用单独 131072 contextTokens 配置，当前 Agnes 模型响应确认无切换；临时配置测试结束自动删除，用户全局配置不变。这是 **128K 配置下的小输入实测**，不是 128K 峰值容量或边界压力验证。
+两项提取实际并发调度并完成，完整提示估算分别为 8273、6292，当前 Agnes 模型响应确认无切换；临时配置测试结束自动删除，用户全局配置不变。**更正：日志显示旧 `agents.defaults.contextTokens=131072` 被 OpenClaw 删除，必须使用 per-model contextTokens。此前“128K 配置下的小输入实测”的结论无效，只能证明双并发和小输入机制；没有完成有效 128K 容量或边界验证。** 测试配置现已改为单个 Agnes 模型条目的 contextTokens，尚未重新实测。
 
 新测试推动了局部章节替换、只携带失败章节、充分原文引述示例和写作目标余量改进；新增断言验证合格章节与未修改知识文件不进入修复提示、章节替换不能注入其他标题。119 项回归通过。不降低章节标准，不靠补字机械凑数，不把 failed/blocked 状态改为成功，也不使用三次上限之外的模型重试。该合成作业未装配或完成；真实课程及长内容质量仍未验证。单次返回提取有真实机制证据，但轻量写作仍是实验性路径。
 
@@ -88,7 +100,7 @@
 - 尝试启动长访谈的当前 Agnes 模型、128K、双并发隔离测试时，自动审批拒绝：之前的明确外发授权仅覆盖《灵动岛》，本次“继续验证”不足以授权其他节目内容外发。进程未启动、没有增加尝试次数，也没有绕过拒绝。已请求两份已复制长内容的逐集外发授权。
 - 正式课程转录样本尚未获得，已请求本地转录和时间戳目录；长学习播客不能替代正式课程。128K 临时配置测试尚未启动；256K 当前模型无可验证窗口，不能修改其标称限制或换模型来冒充同模型测试。
 
-短播客文件流程已完成，接下来需要降低写作多轮交互开销、加强术语推测与语义复核，再扩大长访谈及课程样本验证。256K 若仍不可用则标注未测。不得通过清除次数重新启动本次已达三次的提取或写作任务。
+短播客文件流程已完成，但长内容和轻量写作均存在真实失败。需在保留失败记录和次数的前提下修复并获准开展新的隔离回归，再完成长内容、课程及有效窗口验证。256K 若仍不可用则标注未测。不得通过清除次数重新启动本次已达三次的提取或写作任务。
 
 安装前备份已于 2026-10-03 23:46 完成，备份名 `moc-pocast-listener-before-v4.17.0-20261003-234609`，共 356 个文件，含 SHA-256 清单和本机额外排查笔记。
 
@@ -96,4 +108,4 @@
 
 ## English Summary
 
-119 offline tests pass. Four real local JobTracker integration tests protect the fixed completion gate. Live host tests on invented, non-personal material used an isolated 128K configuration: two extraction workers ran concurrently and passed in one assistant turn each. The optional adapter's writer failed chapter minima, a second start failed the local 24K repair budget, and the final scoped repair remained too short; the task is blocked without counter resets or assembly. These are host-mechanism checks, not real-course or long-content quality evidence or peak 128K stress tests. The earlier authorized short episode passed its original live workflow. Real long-content egress requires explicit episode-specific authorization; a formal course sample and confirmed 256K environment are missing. Installation and GitHub release remain gated on the remaining validation.
+122 offline tests pass. The earlier short episode and four local JobTracker integration tests passed. Synthetic concurrent extraction passed, but synthetic writing failed and blocked. CORRECTION: the legacy 128K setting was discarded by OpenClaw, so those runs did not verify effective 128K configuration. After explicit authorization, the interview fixture failed locally due to old workspace metadata; compatibility/preflight checks were fixed without clearing its counters. Both first long-podcast chunks exhausted three attempts with quote mismatches, oversized evidence or incomplete JSON. Remaining chunks were not run, and no failed report was assembled. A new strict check rejects quotations assembled by skipping intervening source segments. Per-model window configuration is corrected but untested; the course path is still missing. Installation and GitHub release remain gated on live-quality and remaining validation failures.

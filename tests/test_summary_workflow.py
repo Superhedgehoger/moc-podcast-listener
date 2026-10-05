@@ -85,6 +85,18 @@ class WorkflowFixture(unittest.TestCase):
 
 
 class SummaryWorkflowTests(WorkflowFixture):
+    def test_extract_cannot_join_nonadjacent_segments_into_a_direct_quote(self):
+        self.set_source(["First phrase.", "Intervening qualification.", "Last phrase."])
+        workflow.prepare(self.result_path)
+        task = self.extracts()[0]
+        payload = read(task["input"])
+        value = self.evidence(task)
+        value["items"][0]["segment_ids"] = [payload["segments"][0]["id"], payload["segments"][2]["id"]]
+        value["items"][0]["quote"] = "First phrase.Last phrase."
+        save(task["output"], value)
+        with self.assertRaisesRegex(ValueError, "skips intervening"):
+            workflow.validate_task(task)
+
     def test_task_metadata_tracks_coordinator_start_and_failure(self):
         workflow.prepare(self.result_path)
         task = self.extracts()[0]

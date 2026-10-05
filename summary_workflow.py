@@ -188,6 +188,7 @@ def validate_task(task):
         raise ValueError("Output must be an object")
     if task["kind"] == "extract":
         segments = {s["id"]: s for s in payload["segments"]}
+        complete_source = normalized("\n".join(s["text"] for s in payload["segments"]))
         covered = output.get("covered_segment_ids")
         if not isinstance(covered, list) or len(covered) != len(segments) or set(covered) != set(segments):
             raise ValueError("Primary segment coverage incomplete or duplicated")
@@ -208,6 +209,8 @@ def validate_task(task):
             original = "\n".join(s["text"] for s in payload["segments"] if s["id"] in refs)
             if not isinstance(quote, str) or not quote.strip() or normalized(quote) not in normalized(original):
                 raise ValueError(f"Quote is absent from referenced source: {item['id']}")
+            if normalized(quote) not in complete_source:
+                raise ValueError(f"Quote skips intervening source text: {item['id']}")
             if not isinstance(item.get("claim"), str) or not item["claim"].strip():
                 raise ValueError("Claim missing")
             for field in ("topics", "examples", "numbers", "limitations", "ambiguities"):

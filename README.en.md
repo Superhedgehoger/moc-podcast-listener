@@ -76,11 +76,14 @@ all nine detailed sections and their coverage floors remain required. Show Notes
 are assembled as archival material, never used as summary evidence. Personal
 notes remain protected.
 
-An optional [single-response OpenClaw adapter](scripts/openclaw_summary_worker.py)
-returns structured JSON and lets the host write files, avoiding repeated model
-file edits. Start the task first, then pass its `task.json` and the exact current
-model. It uses the same validators and retry limits; live efficiency measurements
-are recorded separately. Artifact-only verification cannot complete a job:
+An optional [bounded OpenClaw adapter](scripts/openclaw_summary_worker.py)
+selects exact source locations instead of copying quotations, then writes each
+report section, knowledge, and coverage batch in separate isolated sessions.
+Validated sections are reused by request hash inside the episode package.
+Start the task first, then pass its `task.json` and the exact current model.
+The same validators and three-start ceiling apply. This adapter remains
+experimental: passing individual chunks does not verify whole-episode quality.
+Artifact-only verification cannot complete a job:
 `--require-report` is mandatory for that transition.
 
 Upgrade the scripts and references together. New opted-in results require

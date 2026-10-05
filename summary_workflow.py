@@ -122,7 +122,7 @@ def prepare(result_path, target_tokens=8000, synthesis_tokens=24000, model=None)
     fingerprint, segments = source(result)
     base = workflow_dir(result)
     settings = {"target_tokens": target_tokens, "synthesis_tokens": synthesis_tokens, "model": model,
-                "chunk_format": "segment_json_short_ids_v1"}
+                "chunk_format": "segment_json_ordinal_ids_v2", "worker_contract": "source_selection_v2"}
     generation_id = digest([fingerprint, settings, PIPELINE_VERSION])[:20]
     generation = base / generation_id
     old = None
@@ -130,6 +130,8 @@ def prepare(result_path, target_tokens=8000, synthesis_tokens=24000, model=None)
         old = read(base / "state.json")
         if old.get("generation") == generation_id:
             return status(result_path)
+        # Retain the complete retry ledger when changed source/settings create a generation.
+        write(base / old["generation"] / "state-snapshot.json", old)
     split = budget_chunks(segments, max(128, target_tokens - 400), model, include_metadata=True)
     state = {"version": PIPELINE_VERSION, "source_hash": fingerprint, "generation": generation_id,
              "settings": settings, "estimator": split["estimator"], "tasks": {}, "levels": [],
@@ -137,7 +139,8 @@ def prepare(result_path, target_tokens=8000, synthesis_tokens=24000, model=None)
     task_ids = []
     for index, chunk in enumerate(split["chunks"]):
         task_id = f"extract-{index:04d}"
-        task = add_task(state, generation, task_id, "extract", {**chunk, "output_budget": 6000})
+        task = add_task(state, generation, task_id, "extract", {
+            **chunk, "output_budget": 6000, "worker_contract": settings["worker_contract"]})
         previous = (old or {}).get("tasks", {}).get(task_id) if (old or {}).get("version") == PIPELINE_VERSION else None
         if previous and previous.get("input_hash") == task["input_hash"] and previous.get("status") == "complete":
             try:

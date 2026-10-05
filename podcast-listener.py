@@ -4897,6 +4897,13 @@ def run_verify(output_dir: Path, target: str, *, require_report: bool) -> int:
         return 1
     try:
         result = read_json_object(result_path)
+        # An absolute result may belong to a different library than the CLI default.
+        if job_path and job_path.parent.parent.name == ".jobs":
+            output_dir = job_path.parent.parent.parent
+        elif result.get("episode_dir"):
+            package = Path(result["episode_dir"]).expanduser().resolve()
+            if package.parent.name == "资料":
+                output_dir = package.parent.parent
         verification = verify_result_artifacts(result, require_report=require_report)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(json.dumps({"ok": False, "errors": [str(exc)]}, ensure_ascii=False, indent=2))

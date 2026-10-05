@@ -79,7 +79,8 @@ def budget_chunks(
         ) or not isinstance(segment["text"], str):
             raise ValueError(f"Segment {index} must contain start, end and string text")
         item = dict(segment)
-        item.setdefault("id", f"segment_{index:06d}_{text_hash(item['text'])[:16]}")
+        # IDs are stable within a source; full source/chunk hashes guard cross-source reuse.
+        item.setdefault("id", f"s{index:x}_{text_hash(item['text'])[:4]}")
         if not isinstance(item["id"], str) or not item["id"] or item["id"] in identifiers:
             raise ValueError(f"Segment {index} has an invalid or duplicate ID")
         identifiers.add(item["id"])

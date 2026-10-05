@@ -296,9 +296,11 @@ python3 podcast-listener.py --verify "RESULT_JSON" --require-report
 `内容摘要` 提供速读概览，但九个详细正文区和逐区覆盖门槛保持不变。
 Show Notes 只由装配器归档，不作为正文证据，个人笔记不得覆盖。
 
-新增可选[单次返回适配器](scripts/openclaw_summary_worker.py)：独立 OpenClaw 会话
-返回结构化 JSON，宿主负责落盘，减少模型反复编辑文件。先启动任务，再传入该任务
-的 `task.json` 和当前模型；沿用相同校验及重试限制，真实效率另行记录。
+新增可选[分任务适配器](scripts/openclaw_summary_worker.py)：提取时选择原文位置，由
+程序保存原样引述；写作按章节、知识洞察和覆盖检查分别调用独立 OpenClaw 会话。
+合格章节按输入哈希复用，避免整篇重写，过程文件仍在每期资料包内部。
+先启动任务，再传入 `task.json` 和当前模型；沿用相同校验及三次启动限制。
+该适配器仍属实验性路径；部分分块通过不等于整集语义质量已验证。
 普通文件检查不能完成后台作业；必须使用 `--require-report` 通过最终核验。
 
 升级时使用同一版本的脚本和参考文档。新结果带 `summary_workflow_version=1`，

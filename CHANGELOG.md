@@ -6,7 +6,8 @@
 - 速读概览与详细报告并存，保留九个正文区、逐区覆盖门槛、案例/数字/局限和证据覆盖记录；Show Notes 仅作归档，个人笔记不被覆盖。
 - 新结果最终核验额外调用 `validate_workflow`；无版本字段的历史结果继续兼容。音频和 WAV 默认保留，`KEEP_AUDIO=0` 显式请求清理。
 - 修复后台完成闸门：只有显式 `--require-report` 且最终核验通过才完成作业，普通文件检查不能绕过总结流程核验。
-- 新增可选 OpenClaw 单次结构化返回适配器，由宿主启动独立会话、脚本落盘并沿用证据校验，减少反复文件编辑；效率验证状态见验证记录。
+- 新增可选 OpenClaw 分任务适配器：选择精确原文位置保存引述，逐章写作、独立知识洞察、按完整草稿分批检查覆盖；合格章节按请求哈希复用，保留每次尝试记录。仍属实验性路径，整集质量和效率验证状态见验证记录。
+- 缩短自动片段标识，完整原文/分块哈希继续守护来源与复用；输入契约变化时保存旧代际的完整状态和失败次数，不覆盖历史总结。
 - Added Chinese/English upgrade and recovery guidance. Simulated/fixture checks are explicitly distinct from live host/model validation; this entry does not claim a live end-to-end run or a published release.
 
 ## v4.16.0 (2026-08-30)

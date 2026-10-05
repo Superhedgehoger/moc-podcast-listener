@@ -208,6 +208,19 @@ class SummaryWorkflowTests(WorkflowFixture):
             self.assertEqual(Path(task[key]).read_bytes(), content)
         self.assertEqual(len(list(workflow.workflow_dir(self.result).glob("*/result.json"))), 1)
 
+    def test_changed_generation_archives_failed_retry_ledger(self):
+        workflow.prepare(self.result_path)
+        task = self.extracts()[0]
+        for _ in range(3):
+            workflow.task_event(self.result_path, task["id"], "start")
+            workflow.task_event(self.result_path, task["id"], "fail", "retained failure")
+        old = self.state()
+        self.set_source(["Changed source evidence."])
+        workflow.prepare(self.result_path)
+        snapshot = read(workflow.workflow_dir(self.result) / old["generation"] / "state-snapshot.json")
+        self.assertEqual(snapshot, old)
+        self.assertEqual(snapshot["tasks"][task["id"]]["attempts"], 3)
+
     def test_concurrency_two_and_retries_stop_after_three_attempts(self):
         self.set_source([str(i) + "x" * 199 for i in range(4)])
         progress = workflow.prepare(self.result_path, target_tokens=800)
@@ -333,7 +346,7 @@ class SummaryWorkflowTests(WorkflowFixture):
         self.set_source([str(i) + "x" * 199 for i in range(4)])
         original = read(self.result["segments_path"])
         workflow.prepare(self.result_path, target_tokens=800)
-        self.assertEqual(self.state()["settings"]["chunk_format"], "segment_json_short_ids_v1")
+        self.assertEqual(self.state()["settings"]["chunk_format"], "segment_json_ordinal_ids_v2")
         tasks = self.extracts()
         self.assertEqual(len(tasks), 4)
         primary = []

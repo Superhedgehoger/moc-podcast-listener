@@ -51,14 +51,41 @@ class WorkerAdapterTests(unittest.TestCase):
     def test_extract_prompt_contains_only_own_input_not_source_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)
-            worker.write(path / "input.json", {"segments": [{"text": "source"}]})
+            worker.write(path / "input.json", {"segments": [{"text": "source", "start": 0, "end": 1}]})
             worker.write(path / "task.md", "# extract\n\nExtract source.\n\nInput: private-source-path\n")
             task = {"kind": "extract", "input": str(path / "input.json"),
                     "instruction": str(path / "task.md"), "output": str(path / "output.json"), "input_hash": "hash"}
             prompt = worker.build_prompt(task)
-            self.assertIn('"text": "source"', prompt)
+            self.assertIn('"0:0": "source"', prompt)
             self.assertNotIn("private-source-path", prompt)
             self.assertIn("Do not call tools", prompt)
+
+    def test_compact_evidence_copies_exact_source_not_model_quotation(self):
+        payload = {"id": "chunk", "source_hash": "hash", "segments": [
+            {"id": "stable1", "text": "First. Qualification!", "start": 0, "end": 5},
+            {"id": "stable2", "text": "Second。", "start": 5, "end": 9}]}
+        response = {"covered_indices": [0, 1], "items": [{"id": "one", "claim": "qualified claim",
+                    "quote_ref": "0:0", "segment_indices": [0], "quote": "invented"}]}
+        expanded = worker.expand_extraction(payload, response)
+        self.assertEqual(expanded["items"][0]["quote"], "First. Qualification!")
+        self.assertEqual(expanded["covered_segment_ids"], ["stable1", "stable2"])
+        literal = {**response, "items": [{**response["items"][0], "id": 1, "quote_ref": "Qualification!"}]}
+        expanded_literal = worker.expand_extraction(payload, literal)
+        self.assertEqual(expanded_literal["items"][0]["quote"], "Qualification!")
+        self.assertEqual(expanded_literal["items"][0]["id"], "1")
+        for covered in ([0], [0, 0], [True, 1]):
+            with self.assertRaises(ValueError):
+                worker.expand_extraction(payload, {**response, "covered_indices": covered})
+        for indices, ref in (([1], "0:0"), ([0], "99:0"), ([False], "0:0"), ([[0]], "0:0")):
+            bad = {**response, "items": [{**response["items"][0], "segment_indices": indices, "quote_ref": ref}]}
+            with self.assertRaises(ValueError):
+                worker.expand_extraction(payload, bad)
+
+    def test_source_catalog_slices_are_contiguous_and_cover_all_text(self):
+        source = " a。" + "long" * 40 + "！\n End?"
+        values = list(worker.source_catalog({"segments": [{"text": source}]}).values())
+        self.assertEqual("".join(values), source)
+        self.assertTrue(all(len(value) <= 60 for value in values))
 
     def test_writer_saves_all_files_then_checks_without_claiming_validity(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -88,6 +115,53 @@ class WorkerAdapterTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "Coordinator must start"):
                     worker.run(path, "provider/current")
                 launch.assert_not_called()
+
+    def test_writer_resume_reuses_valid_parts_without_model_quotation_calls(self):
+        # Orchestration only: synthetic text and final validator mock are NOT quality evidence.
+        helper_spec = importlib.util.spec_from_file_location("writer_fixture", ROOT / "tests/test_bounded_writer.py")
+        helper = importlib.util.module_from_spec(helper_spec)
+        helper_spec.loader.exec_module(helper)
+        payload, sources = helper.fixture()
+        calls = []
+        def invoke(task, workspace, prompt, model, config, timeout, directory):
+            data = json.loads(prompt.split("\nINPUT DATA:\n", 1)[1].split("\nPrevious part rejection", 1)[0])
+            if "section" in data:
+                name = data["section"]
+                calls.append(name)
+                text = "x" * data["target_visible_chars"]
+                if name == "内容大纲" and calls.count(name) == 1:
+                    text = "short"
+                value = {"text": text}
+            elif "leaf_ids" in data:
+                calls.append("coverage")
+                value = {"items": [{"evidence_id": key, "section": "详细总结", "reason": "synthetic"}
+                                    for key in data["leaf_ids"]]}
+            else:
+                calls.append("knowledge")
+                value = {"insights": [{"claim": "synthetic"} for _ in range(6)]}
+            return value, {"elapsed_seconds": 1, "estimated_prompt_tokens": len(prompt.encode("utf-8"))}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            worker.write(path / "input.json", payload)
+            task = {"id": "write", "kind": "write", "attempts": 1, "workspace": tmp,
+                    "input": str(path / "input.json"), "input_hash": "synthetic", "output": str(path / "output.json")}
+            with patch.object(worker, "writer_sources", return_value=sources), patch.object(worker, "invoke", side_effect=invoke), patch.object(worker, "validate_task") as final_check:
+                with self.assertRaisesRegex(ValueError, "Short section"):
+                    worker.run_writer(task, "provider/model", None, 600)
+                task["attempts"] = 2
+                final_check.side_effect = ValueError("Report evidence coverage incomplete")
+                with self.assertRaisesRegex(ValueError, "coverage incomplete"):
+                    worker.run_writer(task, "provider/model", None, 600)
+                final_check.side_effect = None
+                task["attempts"] = 3
+                self.assertTrue(worker.run_writer(task, "provider/model", None, 600)["ok"])
+            self.assertEqual(calls.count("内容摘要"), 1)
+            self.assertEqual(calls.count("内容大纲"), 2)
+            self.assertNotIn("关键引述", calls)
+            self.assertEqual(calls.count("knowledge"), 1)
+            self.assertEqual(calls.count("coverage"), 2)
+            self.assertTrue((path / "writer-run-attempt-1.json").exists())
+            self.assertTrue((path / "writer-run-attempt-2.json").exists())
 
     def test_repair_prompt_excludes_valid_sections_and_unchanged_knowledge(self):
         with tempfile.TemporaryDirectory() as tmp:

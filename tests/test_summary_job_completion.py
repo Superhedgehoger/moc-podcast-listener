@@ -83,6 +83,15 @@ class SummaryJobCompletionTests(unittest.TestCase):
     def state(self):
         return read(workflow.workflow_dir(self.result) / "state.json")
 
+    def test_absolute_result_verification_does_not_touch_default_library(self):
+        other_library = self.root / "untouched-default"
+        output = StringIO()
+        with redirect_stdout(output):
+            code = self.listener.run_verify(other_library, str(self.result_path), require_report=False)
+        self.assertEqual(code, 0)
+        self.assertFalse(other_library.exists())
+        self.assert_pending()
+
     def assert_pending(self):
         for path in (self.tracker.job_path, self.tracker.status_path):
             state = read(path)

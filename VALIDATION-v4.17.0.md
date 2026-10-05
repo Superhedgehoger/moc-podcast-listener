@@ -1,10 +1,10 @@
 # v4.17.0 验证记录 / Validation Record
 
-日期：2026-10-04。状态：本地实现与 117 项离线验证完成；短播客真实文件流程通过；真实 JobTracker 本地状态闸门已修复并通过集成测试。长内容外发审批待用户逐集授权，正式发布待完成。
+日期：2026-10-05。状态：119 项离线测试通过；短播客真实文件流程通过；真实 JobTracker 本地闸门通过集成测试；合成材料的双任务提取实测通过，但轻量写作未达章节要求并已停止。长内容外发审批与课程样本仍缺，正式发布待完成。
 
 ## 已验证
 
-- 当前 117 项离线测试通过，包括原有回归测试。
+- 当前 119 项离线测试通过，包括原有回归测试。
 - 完整 segments 分块、元数据预算、稳定 ID、重叠不重复计入正文证据。
 - 引述原文及时间定位、数字小数点不能被归一化吞掉、重复原话的时间定位。
 - 24K 预算触发分层、原始证据 ID 保留、缺失覆盖与无理由遗漏拒绝。
@@ -66,6 +66,22 @@
 
 ### 本轮续测进展
 
+2026-10-05 另用本地新编的六段虚构软件测试材料完成允许范围内的真实宿主检查，不含任何用户播客/课程内容，不绕过真实长访谈外发拒绝。
+
+| 合成材料阶段 | 启动次数 | 耗时 | 结果 |
+| --- | ---: | ---: | --- |
+| 提取块 1 | 1 | 142.87 秒 | 原文引述、覆盖与预算通过，1 轮交互，累计 5357 tokens |
+| 提取块 2 | 1 | 116.17 秒 | 同批并发，核验通过，1 轮交互 |
+| 写作 | 1 | 131.49 秒 | 完整文件提交，但摘要未达 180 字门槛；累计 8848 tokens |
+| 写作局部修复 | 2 | 本地拦截 | 携带整份旧稿时估算 25265 超过 24K，未调用模型，未重置次数 |
+| 写作局部修复 | 3 | 137.08 秒 | 只携带待修复章节，仍未达摘要门槛；2 轮交互、累计 9427 tokens，最终 blocked |
+
+两项提取实际并发调度并完成，完整提示估算分别为 8273、6292。采用单独 131072 contextTokens 配置，当前 Agnes 模型响应确认无切换；临时配置测试结束自动删除，用户全局配置不变。这是 **128K 配置下的小输入实测**，不是 128K 峰值容量或边界压力验证。
+
+新测试推动了局部章节替换、只携带失败章节、充分原文引述示例和写作目标余量改进；新增断言验证合格章节与未修改知识文件不进入修复提示、章节替换不能注入其他标题。119 项回归通过。不降低章节标准，不靠补字机械凑数，不把 failed/blocked 状态改为成功，也不使用三次上限之外的模型重试。该合成作业未装配或完成；真实课程及长内容质量仍未验证。单次返回提取有真实机制证据，但轻量写作仍是实验性路径。
+
+2026-10-05 再次只读查看模型列表，当前默认仍为 Agnes 3.0 Flash（可用、标称 131072、日常配置 65536）。列表刷新未覆盖全部 provider；没有已确认可用于本轮同模型 256K 测试的环境。不能将未知可用性、其他模型的标称窗口或模拟预算检查当作 256K 实测。
+
 - 独立测试任务使用真实本地 JobTracker、装配器和 run_verify，发现普通 `require_report=False` 检查会错误完成已装配作业。已修复：只有显式要求报告且最终核验通过才调用完成状态转换。4 项集成测试证明有效报告完成、损坏报告/知识仍待总结、普通文件检查不能完成作业。这些采用合成内容，不冒充真实模型质量验证。
 - 新增可选 `scripts/openclaw_summary_worker.py`，通过当前 OpenClaw 模型的一次结构化返回，由宿主落盘并调用同一证据校验器；模型不再需要反复编辑文件。5 项适配器契约测试及任务元数据同步测试通过。尚未声称实测效率提升。
 - 对现有短播客 2 个任务、长访谈 16 个分块、长学习播客 102 个分块检查完整适配器提示：最大保守估算分别为 8562、9051、9138。提取原分块仍以 8K 为目标，适配器完整消息另有 10K 上限；归并/写作完整消息上限 24K。这是本地预算检查，不是模型实测。
@@ -80,4 +96,4 @@
 
 ## English Summary
 
-Local implementation and 117 offline tests pass. Four real local JobTracker integration tests exposed and now protect a fixed completion-gate bypass; their content is synthetic, not live quality evidence. An optional single-response OpenClaw adapter passed contract and full-message budget checks, but has not been live-tested. With episode-specific authorization, Agnes extraction and writing each passed on their third start for the copied short episode; assembly and final artifact verification preserved three archived images and online links. The final writer took 559 seconds and 62 turns with 1,464,335 cumulative tokens including cache reads. Long-content live dispatch was rejected pending explicit episode-specific egress authorization, and a formal course sample is missing. Long-content quality, actual 128K/256K configurations and real concurrency two remain unverified. Installation and GitHub release remain gated on the remaining validation.
+119 offline tests pass. Four real local JobTracker integration tests protect the fixed completion gate. Live host tests on invented, non-personal material used an isolated 128K configuration: two extraction workers ran concurrently and passed in one assistant turn each. The optional adapter's writer failed chapter minima, a second start failed the local 24K repair budget, and the final scoped repair remained too short; the task is blocked without counter resets or assembly. These are host-mechanism checks, not real-course or long-content quality evidence or peak 128K stress tests. The earlier authorized short episode passed its original live workflow. Real long-content egress requires explicit episode-specific authorization; a formal course sample and confirmed 256K environment are missing. Installation and GitHub release remain gated on the remaining validation.

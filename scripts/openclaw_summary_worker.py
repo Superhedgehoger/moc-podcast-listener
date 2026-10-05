@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import subprocess
@@ -13,7 +14,22 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from summary_workflow import read, write, validate_task, quote_matches
+from summary_workflow import read, write, validate_task, quote_matches, normalized, listener
+
+
+def replace_sections(body, updates, allowed):
+    if not isinstance(updates, dict) or not updates or not set(updates) <= set(allowed):
+        raise ValueError("Section repair must name required report sections")
+    for heading, content in updates.items():
+        if not isinstance(content, str) or re.search(r"(?m)^#{1,2}\s", content):
+            raise ValueError("Section repair must contain content only, without report headings")
+        pattern = re.compile(r"(?m)^## " + re.escape(heading) + r"\s*\n[\s\S]*?(?=^## |\Z)")
+        replacement = f"## {heading}\n\n{content.strip()}\n\n"
+        if pattern.search(body):
+            body = pattern.sub(lambda _: replacement, body, count=1)
+        else:
+            body += "\n" + replacement
+    return body
 
 
 def parse_response(text):
@@ -44,14 +60,21 @@ def writer_sources(payload):
         segments = [s for s in chunk["segments"] if s["id"] in location["segment_ids"]]
         start, end = segments[0]["start"], segments[-1]["end"]
         refs.append({"evidence_id": key, "start": start, "end": end})
-        if key in chosen:
+        if key in chosen or sum(len(x["quote"]) for x in quotations) < payload["section_minimums"]["关键引述"] + 30:
             task_id, item_id = key.split(":", 1)
             item = next(x for x in read(state["tasks"][task_id]["output"])["items"] if x["id"] == item_id)
             quote_start = next((s["start"] for s in segments
                                 if quote_matches(item["quote"], s["start"], s["start"], chunk["segments"])), None)
             if quote_start is None:
                 raise ValueError(f"No reliable quotation boundary for {key}")
-            quotations.append({"evidence_id": key, "start": quote_start, "end": end, "quote": item["quote"]})
+            first = next(i for i, s in enumerate(chunk["segments"]) if s["start"] == quote_start)
+            raw = "\n".join(s["text"] for s in chunk["segments"][first:first+4])
+            positions = [i for i, char in enumerate(raw) if not char.isspace()]
+            offset = normalized(raw).find(normalized(item["quote"]))
+            if offset < 0:
+                raise ValueError(f"No contiguous quote excerpt for {key}")
+            excerpt = raw[positions[offset]:positions[offset] + max(140, len(item["quote"]))]
+            quotations.append({"evidence_id": key, "start": quote_start, "end": end, "quote": excerpt})
     return {"boundaries": refs, "verified_quotations": quotations}
 
 
@@ -72,10 +95,31 @@ def build_prompt(task):
         # Paths are validator inputs, not material the writer should copy/read.
         payload = {k: v for k, v in payload.items() if k not in {"result", "report_workflow", "knowledge_workflow", "source_lookup"}}
         payload["source_evidence"] = sources
+        payload["section_targets"] = {key: max(minimum + 60, int(minimum * 1.3))
+                                      for key, minimum in payload["section_minimums"].items()}
+        directory = Path(task["output"]).parent
+        if (directory / "repair.json").exists() and (directory / "body.md").exists():
+            sections = listener().parse_report_sections((directory / "body.md").read_text(encoding="utf-8"))
+            payload["short_sections"] = {key: {"actual": listener().visible_report_chars(sections.get(key, "")), "minimum": minimum}
+                                         for key, minimum in payload["section_minimums"].items()
+                                         if listener().visible_report_chars(sections.get(key, "")) < minimum}
+            error = read(directory / "repair.json").get("error", "")
+            affected = set(payload["short_sections"])
+            if "quot" in error.lower():
+                affected.add("关键引述")
+            for heading, content in sections.items():
+                if re.search(r"Show\s*Notes", content, re.I) or any(value in content for value in re.findall(r"https?://\S+|\d{2}:\d{2}:\d{2}", error)):
+                    affected.add(heading)
+            payload["existing_draft"] = {"sections": {key: sections.get(key, "") for key in affected}}
+            if "Knowledge" in error:
+                payload["existing_draft"]["knowledge"] = read(directory / "knowledge.draft.json")
+            if "coverage" in error.lower():
+                payload["existing_draft"]["coverage"] = read(directory / "coverage.json")
         prompt = common + (
             "Return {body: MARKDOWN_STRING, knowledge: OBJECT, coverage: {items:[{evidence_id,section,reason}]}}. "
             "body has exactly the nine headings listed in section_minimums, at level ##. "
-            "Meet each minimum visible character length, not by repetition. 内容摘要 is a quick overview; "
+            "Aim for section_targets (visible characters), leaving margin above the strict section_minimums. "
+            "Do not guess that a short paragraph meets the minimum and do not pad by repetition. 内容摘要 is a quick overview; "
             "详细总结 develops the argument fully, including cases, mechanisms, numbers and limits. "
             "Do not add title/date/basic-info/archive/footer sections. ALL timestamps must be rounded original "
             "start/end boundaries in source_evidence. 关键引述 contains at least three lines ONLY, each "
@@ -90,6 +134,12 @@ def build_prompt(task):
             "Use 6-12 substantial insights, grounded in the input; no unsupported background. "
             "JSON must use double quotes and escape newlines inside strings.\n"
         )
+        if "existing_draft" in payload:
+            prompt += ("REPAIR MODE: instead of body, return {sections:{HEADING:REVISED_CONTENT}, "
+                       "knowledge:OBJECT_IF_CHANGED, coverage:OBJECT_IF_CHANGED}. "
+                       "No headings inside revised content. Repair all short_sections plus any reported errors, "
+                       "and preserve every other section. Expand with supported details only, not filler. "
+                       "Quote all supplied verified_quotations if needed to satisfy the quote-section minimum.\n")
     prompt += "\nINPUT DATA:\n" + json.dumps(payload, ensure_ascii=False)
     directory = Path(task["output"]).parent
     repair = directory / "repair.json"
@@ -101,6 +151,18 @@ def build_prompt(task):
 def save_response(task, response):
     directory = Path(task["output"]).parent
     if task["kind"] == "write":
+        if "sections" in response:
+            body = (directory / "body.md").read_text(encoding="utf-8")
+            allowed = read(task["input"])["section_minimums"]
+            write(directory / "body.md", replace_sections(body, response["sections"], allowed))
+            for key, name in (("knowledge", "knowledge.draft.json"), ("coverage", "coverage.json")):
+                if key in response:
+                    if not isinstance(response[key], dict):
+                        raise ValueError(f"Invalid repair {key}")
+                    write(directory / name, response[key])
+            write(task["output"], {"input_hash": task["input_hash"]})
+            validate_task(task)
+            return
         if not isinstance(response.get("body"), str) or not isinstance(response.get("knowledge"), dict) or not isinstance(response.get("coverage"), dict):
             raise ValueError("Writer must return body, knowledge and coverage")
         write(directory / "body.md", response["body"])

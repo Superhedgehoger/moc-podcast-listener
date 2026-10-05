@@ -13,6 +13,15 @@ spec.loader.exec_module(worker)
 
 
 class WorkerAdapterTests(unittest.TestCase):
+    def test_section_repair_preserves_other_sections_and_rejects_injection(self):
+        body = "## A\n\nOld A\n\n## B\n\nPreserve B exactly.\n"
+        changed = worker.replace_sections(body, {"A": "New A"}, {"A": 1, "B": 1})
+        self.assertIn("New A", changed)
+        self.assertTrue(changed.endswith("## B\n\nPreserve B exactly.\n"))
+        for updates in ({"C": "new"}, {"A": "## B\nInjected"}, {}):
+            with self.assertRaises(ValueError):
+                worker.replace_sections(body, updates, {"A": 1, "B": 1})
+
     def test_accepts_json_and_complete_fence_but_not_commentary(self):
         self.assertEqual(worker.parse_response('{"items":[]}'), {"items": []})
         self.assertEqual(worker.parse_response('```json\n{"items":[]}\n```'), {"items": []})
@@ -60,6 +69,23 @@ class WorkerAdapterTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "Coordinator must start"):
                     worker.run(path, "provider/current")
                 launch.assert_not_called()
+
+    def test_repair_prompt_excludes_valid_sections_and_unchanged_knowledge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            payload = {"entries": [], "leaf_ids": ["one"], "section_minimums": {"内容摘要": 20, "详细总结": 10}}
+            worker.write(path / "input.json", payload)
+            worker.write(path / "body.md", "## 内容摘要\n短\n## 详细总结\nALREADY_VALID_SECTION_CONTENT\n")
+            worker.write(path / "repair.json", {"error": "Repair only short/missing section: 内容摘要"})
+            worker.write(path / "knowledge.draft.json", {"private_marker": "UNCHANGED_KNOWLEDGE"})
+            worker.write(path / "coverage.json", {"items": []})
+            task = {"kind": "write", "input": str(path / "input.json"), "output": str(path / "output.json"), "input_hash": "hash"}
+            with patch.object(worker, "writer_sources", return_value={"boundaries": [], "verified_quotations": []}):
+                prompt = worker.build_prompt(task)
+            self.assertIn("REPAIR MODE", prompt)
+            self.assertIn('"actual": 1', prompt)
+            self.assertNotIn("ALREADY_VALID_SECTION_CONTENT", prompt)
+            self.assertNotIn("UNCHANGED_KNOWLEDGE", prompt)
 
 
 if __name__ == "__main__":

@@ -45,8 +45,8 @@ class BoundedWriterTests(unittest.TestCase):
     def test_independent_requests_preserve_nine_sections_and_budget(self):
         before = copy.deepcopy((self.payload, self.sources))
         requests = writer.plan(self.payload, self.sources)
-        self.assertEqual(len(requests), 10)
-        self.assertEqual([r["name"] for r in requests[:9]], list(self.payload["section_minimums"]))
+        sections = {r.get("section", r["name"]) for r in requests if r["kind"] in {"section", "section_piece"}}
+        self.assertEqual(sections, set(self.payload["section_minimums"]))
         self.assertEqual(requests[-1]["kind"], "knowledge")
         self.assertEqual((self.payload, self.sources), before)
         for request in requests:
@@ -62,13 +62,30 @@ class BoundedWriterTests(unittest.TestCase):
     def test_relevant_details_and_strict_minima_not_weakened(self):
         requests = {r["name"]: r for r in writer.plan(self.payload, self.sources)}
         overview = requests["内容摘要"]["prompt"]
-        detail = requests["详细总结"]["prompt"]
+        pieces = writer.detail_requests(self.payload)
+        detail = pieces[0]["prompt"]
         self.assertNotIn('"examples"', overview)
         for field in ("examples", "numbers", "limitations", "ambiguities"):
             self.assertIn(f'"{field}"', detail)
         data = json.loads(detail.split("\nINPUT DATA:\n")[1])
-        self.assertEqual(data["minimum_visible_chars"], 700)
-        self.assertGreater(data["target_visible_chars"], 700)
+        self.assertGreaterEqual(sum(piece["minimum_visible_chars"] for piece in pieces), 700)
+        self.assertGreater(data["target_visible_chars"], data["minimum_visible_chars"])
+
+    def test_detail_pieces_cover_all_claims_without_duplication_and_keep_final_floor(self):
+        pieces = writer.detail_requests(self.payload)
+        claims = [claim for piece in pieces for claim in json.loads(piece["prompt"].split("\nINPUT DATA:\n")[1])["claims"]]
+        self.assertEqual(claims, writer._evidence(self.payload, writer.FIELDS["详细总结"])["claims"])
+        text = "x" * pieces[0]["minimum_visible_chars"]
+        self.assertEqual(writer.validate_piece(pieces[0], text, self.payload, self.sources), text)
+        with self.assertRaisesRegex(ValueError, "Short section"):
+            writer.validate_piece(pieces[0], "short", self.payload, self.sources)
+        with self.assertRaisesRegex(ValueError, "Short section"):
+            writer.validate_section("详细总结", text, self.payload, self.sources)
+        altered = {**pieces[0], "prompt": "changed"}
+        with self.assertRaises(ValueError):
+            writer.validate_piece(altered, text, self.payload, self.sources)
+        with self.assertRaisesRegex(ValueError, "URL is absent"):
+            writer.validate_piece(pieces[0], text + " https://invented.example/", self.payload, self.sources)
 
     def test_coverage_retains_all_leaf_ids_and_semantic_claims(self):
         request = writer.coverage_request(self.payload, self.sources)

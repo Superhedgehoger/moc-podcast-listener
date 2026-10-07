@@ -32,14 +32,37 @@ def replace_sections(body, updates, allowed):
     return body
 
 
-def parse_response(text):
+def parse_response(text, diagnostics=None):
     text = text.strip()
     if text.startswith("```"):
         lines = text.splitlines()
         if len(lines) < 3 or lines[-1].strip() != "```":
             raise ValueError("Incomplete JSON fence")
         text = "\n".join(lines[1:-1])
-    value = json.loads(text)
+    def unique_keys(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"Duplicate JSON key: {key}")
+            value[key] = item
+        return value
+    decoder = json.JSONDecoder(object_pairs_hook=unique_keys)
+    value, end = decoder.raw_decode(text)
+    suffix = text[end:].strip()
+    if suffix:
+        # Accept only the observed one redundant closer, never incomplete JSON,
+        # multiple objects, commentary, or discarded evidence fields.
+        if isinstance(value, dict) and suffix == "}":
+            if diagnostics is not None:
+                diagnostics.append("removed_one_redundant_trailing_object_closer")
+        elif isinstance(value, dict) and suffix.startswith(","):
+            repeated, repeated_end = decoder.raw_decode(suffix[1:].lstrip())
+            if suffix[1:].lstrip()[repeated_end:].strip() or digest(repeated) != digest(value):
+                raise ValueError("Unexpected trailing JSON data")
+            if diagnostics is not None:
+                diagnostics.append("removed_identical_duplicate_complete_json_object")
+        else:
+            raise ValueError("Unexpected trailing JSON data")
     if not isinstance(value, dict):
         raise ValueError("Worker response must be a JSON object")
     return value
@@ -97,6 +120,20 @@ def expand_extraction(payload, response):
             "covered_segment_ids": [segments[i]["id"] for i in covered], "items": expanded}
 
 
+def complete_excerpt(raw, quote):
+    positions = [index for index, char in enumerate(raw) if not char.isspace()]
+    offset = normalized(raw).find(normalized(quote))
+    if offset < 0:
+        raise ValueError("No contiguous source quotation")
+    begin, end = positions[offset], positions[offset + len(normalized(quote)) - 1] + 1
+    # Keep original punctuation and extend to sentence/segment boundaries, never fixed-character cuts.
+    before = list(re.finditer(r"[。！？!?\n]", raw[:begin]))
+    begin = before[-1].end() if before else 0
+    after = re.search(r"[。！？!?\n]", raw[end:])
+    end = end + after.end() if after else len(raw)
+    return raw[begin:end].strip()
+
+
 def writer_sources(payload):
     from summary_workflow import load
     result_path = payload["source_lookup"]["result"]
@@ -119,7 +156,16 @@ def writer_sources(payload):
         refs.append({"evidence_id": key, "start": start, "end": end})
         if key in chosen or sum(len(x["quote"]) for x in quotations) < payload["section_minimums"]["关键引述"] + 30:
             quote_start = next((s["start"] for s in segments
-                                if quote_matches(item["quote"], s["start"], s["start"], chunk["segments"])), None)
+                                if normalized(item["quote"]) in normalized(s["text"])), None)
+            if quote_start is None:
+                for index, segment in enumerate(chunk["segments"]):
+                    if segment["id"] not in item["segment_ids"]:
+                        continue
+                    combined = normalized("\n".join(s["text"] for s in chunk["segments"][index:index + 4]))
+                    offset = combined.find(normalized(item["quote"]))
+                    if 0 <= offset < len(normalized(segment["text"])):
+                        quote_start = segment["start"]
+                        break
             if quote_start is None:
                 raise ValueError(f"No reliable quotation boundary for {key}")
             first = next(i for i, s in enumerate(chunk["segments"]) if s["start"] == quote_start)
@@ -128,7 +174,7 @@ def writer_sources(payload):
             offset = normalized(raw).find(normalized(item["quote"]))
             if offset < 0:
                 raise ValueError(f"No contiguous quote excerpt for {key}")
-            excerpt = raw[positions[offset]:positions[offset] + max(140, len(item["quote"]))]
+            excerpt = complete_excerpt(raw, item["quote"])
             quotations.append({"evidence_id": key, "start": quote_start, "end": end, "quote": excerpt})
     return {"boundaries": refs, "verified_quotations": quotations}
 
@@ -308,7 +354,10 @@ def invoke(task, workspace, prompt, model, config, timeout, directory):
         actual = f"{envelope.get('provider')}/{envelope.get('model')}"
         if actual != model:
             raise ValueError(f"Host used {actual}, not the requested current model {model}")
-        response = parse_response(envelope["final"])
+        diagnostics = []
+        response = parse_response(envelope["final"], diagnostics)
+        if diagnostics:
+            record["syntax_normalization"] = diagnostics
     except (ValueError, KeyError, TypeError) as exc:
         record["validation_error"] = str(exc)
         raise
@@ -324,6 +373,16 @@ def run_writer(task, model, config, timeout):
     requests = bounded_writer.plan(payload, sources)
     workspace = task.get("workspace") or str(Path(task["input"]).parent.parent)
     directory = Path(task["output"]).parent
+    repair_path = directory / "semantic-repair.json"
+    if repair_path.exists():
+        repair = read(repair_path)
+        for request in requests:
+            name = request.get("section", request["name"])
+            note = repair.get("sections", {}).get(name) if request["kind"] != "knowledge" else repair.get("knowledge")
+            if note and request["prompt"]:
+                note = str(note).encode("utf-8")[:500].decode("utf-8", errors="ignore")
+                request["prompt"] += "\nIndependent source-fidelity rejection to repair:\n" + str(note)
+                request["estimated_bytes"] = len(request["prompt"].encode("utf-8"))
     sections, metrics = {}, []
     config_path = Path(config) if config else Path.home() / ".openclaw/openclaw.json"
     config_hash = digest(read(config_path)) if config_path.exists() else None
@@ -337,9 +396,13 @@ def run_writer(task, model, config, timeout):
             saved = read(cache)
             if (saved.get("input_hash") == expected and "value" in saved
                     and saved.get("output_hash") == digest(saved["value"])):
-                if request["kind"] == "section":
+                if request["kind"] in {"section", "section_piece"}:
                     try:
-                        bounded_writer.validate_section(request["name"], saved["value"], payload, sources)
+                        if request["kind"] == "section_piece":
+                            base_request = next(item for item in bounded_writer.detail_requests(payload) if item["name"] == request["name"])
+                            bounded_writer.validate_piece(base_request, saved["value"], payload, sources)
+                        else:
+                            bounded_writer.validate_section(request["name"], saved["value"], payload, sources)
                     except ValueError:
                         cache.unlink()
                     else:
@@ -351,7 +414,7 @@ def run_writer(task, model, config, timeout):
         rejection = part / "rejection.json"
         if rejection.exists():
             diagnostic = str(read(rejection).get("error", ""))
-            diagnostic = diagnostic.encode("utf-8")[:700].decode("utf-8", errors="ignore")
+            diagnostic = diagnostic.encode("utf-8")[:300].decode("utf-8", errors="ignore")
             prompt += "\nPrevious part rejection; repair this issue using source evidence, not filler:\n" + diagnostic
         try:
             value, record = invoke(task, workspace, prompt, model, config, timeout, log_dir)
@@ -360,7 +423,10 @@ def run_writer(task, model, config, timeout):
             raise
         metrics.append({"part": request["name"], **record})
         try:
-            if request["kind"] == "section":
+            if request["kind"] == "section_piece":
+                base_request = next(item for item in bounded_writer.detail_requests(payload) if item["name"] == request["name"])
+                value = bounded_writer.validate_piece(base_request, value.get("text"), payload, sources)
+            elif request["kind"] == "section":
                 value = bounded_writer.validate_section(request["name"], value.get("text"), payload, sources)
             elif request["kind"] == "knowledge":
                 if not isinstance(value.get("insights"), list) or len(value["insights"]) < 6:
@@ -386,29 +452,34 @@ def run_writer(task, model, config, timeout):
 
     try:
         knowledge = None
+        detail_pieces = []
         for request in requests:
             if request["kind"] == "coverage":
                 continue  # Coverage must refer to the actual finished draft.
             if request["prompt"] is None:
                 sections[request["name"]] = request["text"]
+            elif request["kind"] == "section_piece":
+                detail_pieces.append(dispatch(request))
             elif request["kind"] == "section":
                 sections[request["name"]] = dispatch(request)
             else:
                 knowledge = dispatch(request)
-        body = bounded_writer.assemble_sections(sections, payload, sources)
-        coverage = {"items": []}
-        coverage_requests = bounded_writer.coverage_requests(payload, sources, sections)
-        for request in coverage_requests:
-            coverage["items"].extend(dispatch(request)["items"])
+        sections["详细总结"] = "\n\n".join(detail_pieces)
+        coverage_requests = []
         try:
+            body = bounded_writer.assemble_sections(sections, payload, sources)
+            coverage = {"items": []}
+            coverage_requests = bounded_writer.coverage_requests(payload, sources, sections)
+            for request in coverage_requests:
+                coverage["items"].extend(dispatch(request)["items"])
             save_response(task, {"body": body, "knowledge": knowledge, "coverage": coverage})
         except ValueError as exc:
             message = str(exc)
             affected = [request for request in requests + coverage_requests if (
                 (request["kind"] == "knowledge" and "knowledge" in message.lower())
                 or (request["kind"] == "coverage" and "coverage" in message.lower())
-                or (request["kind"] == "section" and request["prompt"] is not None and (
-                    request["name"] in message or any(url in sections[request["name"]]
+                or (request["kind"] in {"section", "section_piece"} and request["prompt"] is not None and (
+                    request.get("section", request["name"]) in message or any(url in sections[request.get("section", request["name"])]
                     for url in re.findall(r"https?://[^\s;]+", message))))) ]
             # Unclassified/source failures remain explicit; do not regenerate unrelated artifacts.
             for request in affected:

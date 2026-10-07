@@ -21,6 +21,16 @@ def segments(*texts):
 
 
 class SegmentChunkingTests(unittest.TestCase):
+    def test_segment_count_cap_keeps_every_primary_and_complete_overlap(self):
+        source = segments(*[str(i) for i in range(75)])
+        result = MODULE.budget_chunks(source, 8000, max_segments=32)
+        self.assertEqual([len(c["segments"]) for c in result["chunks"]], [32, 32, 11])
+        self.assertEqual([s["text"] for c in result["chunks"] for s in c["segments"]], [s["text"] for s in source])
+        self.assertEqual(result["chunks"][1]["context_segments"], [result["chunks"][0]["segments"][-1]])
+        for cap in (0, -1, True, "32"):
+            with self.assertRaises(ValueError):
+                MODULE.budget_chunks(source, 8000, max_segments=cap)
+
     def test_exact_boundary_and_newline_cost(self):
         source = segments("abc", "de", "f")
         result = MODULE.budget_chunks(source, 6)

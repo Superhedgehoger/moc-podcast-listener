@@ -4202,6 +4202,18 @@ def rebuild_human_index(output_dir: Path) -> Path:
     output_dir = output_dir.expanduser()
     package_root = output_dir / "资料"
     completion_times = report_completion_times(output_dir)
+    report_states: dict[str, tuple[float, str]] = {}
+    for result_path in (output_dir / ".jobs").glob("*/result.json"):
+        try:
+            tracked = read_json_object(result_path)
+            if tracked.get("mode") != "transcribe" or not tracked.get("report_path"):
+                continue
+            key = str(Path(tracked["report_path"]).expanduser().resolve())
+            stamp = result_path.stat().st_mtime
+            if stamp >= report_states.get(key, (0, ""))[0]:
+                report_states[key] = (stamp, str(tracked.get("job_status", "")))
+        except (OSError, ValueError, TypeError):
+            continue
     rows: list[dict[str, str]] = []
     for metadata_path in package_root.glob("*/metadata.json") if package_root.is_dir() else []:
         try:
@@ -4234,7 +4246,8 @@ def rebuild_human_index(output_dir: Path) -> Path:
                 "transcript_date": format_index_timestamp(transcript_time),
                 "show": escape_markdown_table_cell(episode.get("show_title") or "未知节目"),
                 "title": escape_markdown_table_cell(episode.get("title") or package_name),
-                "status": human_index_status(transcript_path, report_path, mode),
+                "status": ("待总结" if report_states.get(str(report_path.resolve()), (0, ""))[1] in {"awaiting_report", "failed"}
+                           else human_index_status(transcript_path, report_path, mode)),
                 "url": str(episode.get("url") or "").strip(),
                 "transcript": relative_output_path(transcript_path, output_dir)
                 if transcript_path.is_file()
@@ -4522,6 +4535,17 @@ class JobTracker:
                 self.result_path,
                 json.dumps(result, ensure_ascii=False, indent=2) + "\n",
             )
+        self.persist()
+
+    def mark_report_pending(self, reason: str) -> None:
+        self.state.update(status="awaiting_report", current_phase="awaiting_report",
+                          progress=JOB_PHASE_PROGRESS["awaiting_report"], report_status="pending", error=reason)
+        self.state.pop("completed_at", None)
+        if self.result_path.is_file():
+            result = read_json_object(self.result_path)
+            result["job_status"] = "awaiting_report"
+            result.pop("report_verified_at", None)
+            atomic_write_text(self.result_path, json.dumps(result, ensure_ascii=False, indent=2) + "\n")
         self.persist()
 
 
@@ -4918,6 +4942,10 @@ def run_verify(output_dir: Path, target: str, *, require_report: bool) -> int:
     if require_report and verification["ok"] and verification["report_present"] and job_path and job_path.is_file():
         tracker = JobTracker(job_path.parent, read_json_object(job_path), resumed=True)
         tracker.mark_report_complete()
+    elif require_report and not verification["ok"] and job_path and job_path.is_file():
+        tracker = JobTracker(job_path.parent, read_json_object(job_path), resumed=True)
+        if tracker.state.get("status") == "completed":
+            tracker.mark_report_pending("; ".join(verification["errors"]))
     if verification["ok"]:
         verification["knowledge_index"] = rebuild_knowledge_index(output_dir)
         verification["index_path"] = str(rebuild_human_index(output_dir))

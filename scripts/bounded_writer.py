@@ -120,6 +120,18 @@ def _request(kind, name, instruction, data):
     return {"kind": kind, "name": name, "prompt": prompt, "estimated_bytes": size}
 
 
+def bounded_source_context(payload):
+    path = Path(payload.get("result", {}).get("segments_path", ""))
+    if not path.is_file():
+        return None
+    segments = json.loads(path.read_text(encoding="utf-8"))
+    context = [{key: segment[key] for key in ("start", "end", "text")} for segment in segments]
+    # Include a whole small source only; larger sources need scoped retrieval, not truncation.
+    if len(json.dumps(context, ensure_ascii=False).encode("utf-8")) <= 8000:
+        return context
+    return None
+
+
 def quotation_section(payload, sources):
     """Render only adapter-verified excerpts, using the existing rounding rule."""
     _minimums(payload)
@@ -150,7 +162,7 @@ def quotation_section(payload, sources):
     return text
 
 
-def _validate_content(name, text, payload):
+def _validate_content(name, text, payload, piece_minimum=None):
     minimums = _minimums(payload)
     if name not in minimums or not isinstance(text, str):
         raise ValueError("Unknown section or non-string content")
@@ -160,9 +172,65 @@ def _validate_content(name, text, payload):
     if set(parsed) != {name}:
         raise ValueError("Section contains injected report headings")
     actual = listener().visible_report_chars(parsed[name])
-    if actual < minimums[name]:
-        raise ValueError(f"Short section {name}: {actual} visible chars < minimum {minimums[name]}")
+    minimum = minimums[name] if piece_minimum is None else piece_minimum
+    if actual < minimum:
+        raise ValueError(f"Short section {name}: {actual} visible chars < minimum {minimum}")
     return text.strip()
+
+
+def detail_requests(payload):
+    minimum = _minimums(payload)["详细总结"]
+    evidence = _evidence(payload, FIELDS["详细总结"])
+    claims = evidence["claims"]
+    if not claims:
+        raise ValueError("Detailed writing requires substantive source claims")
+    count = min(len(claims), max(1, math.ceil(minimum / 250)))
+    floor = math.ceil(minimum / count)
+    requests = []
+    for index in range(count):
+        group = claims[index * len(claims) // count:(index + 1) * len(claims) // count]
+        data = {"section": "详细总结", "piece_index": index, "piece_count": count,
+                "minimum_visible_chars": floor, "target_visible_chars": max(floor + 160, floor * 2),
+                "claims": group}
+        context = bounded_source_context(payload)
+        if context is not None:
+            data["original_source_context"] = context
+        request = _request("section_piece", f"详细总结/part-{index:04d}", (
+            'Return {"text":STRING}: Chinese paragraphs developing ONLY this evidence group, no headings. '
+            "This is one part of a detailed report, not an overview of the entire episode. "
+            "Explain the actual argument, its concrete examples, reasoning and qualifications. "
+            "Do not repeat other topics, invent background, add timestamps or pad with filler. "
+            "Original source text is authoritative; evidence claims are intermediate notes that may omit qualifications. "
+            "Do not replace a source author with a familiar name from your background knowledge. "
+            "Aim above target_visible_chars. Preserve uncertain names as uncertain."
+        ), data)
+        request.update(section="详细总结", minimum_visible_chars=floor)
+        requests.append(request)
+    return requests
+
+
+def validate_piece(request, text, payload, sources):
+    planned = next((item for item in detail_requests(payload) if item["name"] == request["name"]), None)
+    if planned is None or planned["prompt"] != request["prompt"]:
+        raise ValueError("Unknown or changed detail piece")
+    text = _validate_content("详细总结", text, payload, planned["minimum_visible_chars"])
+    if re.search(r"\b\d{1,3}:\d{2}(?::\d{2})?\b", text):
+        raise ValueError("Detail pieces must not add timestamps")
+    # Full-section checks, including original URLs, also run after concatenation.
+    if re.search(r"Show\s*Notes", text, re.I):
+        raise ValueError("Detail pieces must not mention Show Notes")
+    data = json.loads(planned["prompt"].split("\nINPUT DATA:\n", 1)[1])
+    evidence = json.dumps(data["claims"], ensure_ascii=False)
+    for url in re.findall(r"https?://[^\s<>\]\)]+", text):
+        if url not in evidence:
+            raise ValueError(f"Detail piece URL is absent from its evidence: {url}")
+    context = bounded_source_context(payload)
+    if context is not None:
+        from summary_workflow import unseen_proper_names
+        unknown = unseen_proper_names(text, "\n".join(segment["text"] for segment in context))
+        if unknown:
+            raise ValueError("Source-absent proper names: " + ", ".join(unknown))
+    return text
 
 
 def validate_section(name, text, payload, sources):
@@ -279,6 +347,9 @@ def plan(payload, sources):
     boundaries = _boundaries(payload, sources)
     requests = []
     for name, minimum in minimums.items():
+        if name == "详细总结":
+            requests.extend(detail_requests(payload))
+            continue
         if name == QUOTE_SECTION:
             text = quotation_section(payload, sources)
             requests.append({"kind": "section", "name": name, "prompt": None,
@@ -299,6 +370,10 @@ def plan(payload, sources):
     indices = sorted({round(i * (len(claims) - 1) / max(1, count - 1)) for i in range(count)})
     selected = [claims[index] for index in indices]
     selected_ids = {key for item in selected for key in item["evidence_ids"]}
+    knowledge_data = {"claims": selected, "boundaries": [item for item in boundaries if item["evidence_id"] in selected_ids]}
+    context = bounded_source_context(payload)
+    if context is not None:
+        knowledge_data["original_source_context"] = context
     requests.append(_request("knowledge", "knowledge", (
         "Return ONLY the knowledge object, using the current adapter schema: "
         '{"schema_version":1,"status":"complete","topics":[],"entities":[],"ai_tags":[],"insights":['
@@ -314,8 +389,7 @@ def plan(payload, sources):
         "do not assign an unsupported leaf-specific paraphrase to an arbitrary first ID. "
         "Each paraphrase must use the matching evidence_id's "
         "original numeric start/end boundary, not guessed times or thematic chronology."
-    ), {"claims": selected, "boundaries": [item for item in boundaries
-                                           if item["evidence_id"] in selected_ids]}))
+    ), knowledge_data))
     return requests
 
 

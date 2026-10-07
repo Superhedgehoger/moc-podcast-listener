@@ -193,6 +193,24 @@ class SummaryJobCompletionTests(unittest.TestCase):
         self.complete_and_assemble()
         self.assert_successfully_completed()
 
+    def test_later_failed_verification_revokes_completed_state(self):
+        self.complete_and_assemble()
+        self.assert_successfully_completed()
+        save(self.result["report_path"], "# Invalid report\n")
+        code, payload = self.verify()
+        self.assertEqual(code, 1, payload)
+        self.assert_pending()
+
+    def test_required_semantic_review_cannot_be_bypassed_by_artifact_checks(self):
+        self.complete_and_assemble()
+        result = read(self.result_path)
+        result["require_semantic_review"] = True
+        save(self.result_path, result)
+        code, payload = self.verify()
+        self.assertEqual(code, 1, payload)
+        self.assertTrue(any("semantic review" in error.lower() for error in payload["errors"]), payload)
+        self.assert_pending()
+
     def test_invalid_report_keeps_tracked_job_pending_until_repaired(self):
         self.complete_and_assemble()
         save(self.result["report_path"], "# Invalid report\n")

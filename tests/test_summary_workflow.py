@@ -85,6 +85,10 @@ class WorkflowFixture(unittest.TestCase):
 
 
 class SummaryWorkflowTests(WorkflowFixture):
+    def test_source_absent_composite_name_is_flagged_not_silently_accepted(self):
+        self.assertIn("Zaha Hadid", workflow.unseen_proper_names("Zaha Hadid wrote the thesis", "库哈斯的论文"))
+        self.assertEqual(workflow.unseen_proper_names("Conversation Piece", "conversation piece"), [])
+
     def test_extract_cannot_join_nonadjacent_segments_into_a_direct_quote(self):
         self.set_source(["First phrase.", "Intervening qualification.", "Last phrase."])
         workflow.prepare(self.result_path)
@@ -220,6 +224,42 @@ class SummaryWorkflowTests(WorkflowFixture):
         snapshot = read(workflow.workflow_dir(self.result) / old["generation"] / "state-snapshot.json")
         self.assertEqual(snapshot, old)
         self.assertEqual(snapshot["tasks"][task["id"]]["attempts"], 3)
+
+    def test_settings_change_preserves_exhaustion_for_identical_extraction_input(self):
+        workflow.prepare(self.result_path)
+        task = self.extracts()[0]
+        for _ in range(3):
+            workflow.task_event(self.result_path, task["id"], "start")
+            workflow.task_event(self.result_path, task["id"], "fail", "retained failure")
+        workflow.prepare(self.result_path, target_tokens=7999)
+        changed = self.extracts()[0]
+        self.assertEqual(changed["input_hash"], task["input_hash"])
+        self.assertEqual((changed["status"], changed["attempts"]), ("blocked", 3))
+        with self.assertRaises(ValueError):
+            workflow.task_event(self.result_path, changed["id"], "start")
+
+    def test_settings_cannot_migrate_while_worker_is_running(self):
+        workflow.prepare(self.result_path)
+        task = self.extracts()[0]
+        workflow.task_event(self.result_path, task["id"], "start")
+        before = self.state()
+        with self.assertRaisesRegex(ValueError, "Wait for running workers"):
+            workflow.prepare(self.result_path, target_tokens=7999)
+        self.assertEqual(self.state(), before)
+
+    def test_content_budget_separate_from_provenance_and_full_budget(self):
+        workflow.prepare(self.result_path)
+        task = self.extracts()[0]
+        value = self.evidence(task, detail_size=6100)
+        save(task["output"], value)
+        self.assertLess(workflow.tokens(value), 8000)
+        with self.assertRaisesRegex(ValueError, "Evidence content exceeds budget"):
+            workflow.validate_task(task)
+        value["items"][0]["claim"] = "short supported claim"
+        value["items"][0]["quote"] = "not in original"
+        save(task["output"], value)
+        with self.assertRaisesRegex(ValueError, "Quote is absent"):
+            workflow.validate_task(task)
 
     def test_concurrency_two_and_retries_stop_after_three_attempts(self):
         self.set_source([str(i) + "x" * 199 for i in range(4)])

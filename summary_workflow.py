@@ -122,7 +122,9 @@ def prepare(result_path, target_tokens=8000, synthesis_tokens=24000, model=None)
     fingerprint, segments = source(result)
     base = workflow_dir(result)
     settings = {"target_tokens": target_tokens, "synthesis_tokens": synthesis_tokens, "model": model,
-                "chunk_format": "segment_json_ordinal_ids_v2", "worker_contract": "source_selection_v2"}
+                "chunk_format": "segment_json_ordinal_ids_v2", "worker_contract": "source_selection_v2",
+                "max_primary_segments": 32, "writer_format": "evidence_detail_pieces_v3",
+                "evidence_budget_format": "content6000_serialized8000_v3"}
     generation_id = digest([fingerprint, settings, PIPELINE_VERSION])[:20]
     generation = base / generation_id
     old = None
@@ -130,9 +132,12 @@ def prepare(result_path, target_tokens=8000, synthesis_tokens=24000, model=None)
         old = read(base / "state.json")
         if old.get("generation") == generation_id:
             return status(result_path)
+        if any(task.get("status") == "running" for task in old.get("tasks", {}).values()):
+            raise ValueError("Wait for running workers before changing workflow generation")
         # Retain the complete retry ledger when changed source/settings create a generation.
         write(base / old["generation"] / "state-snapshot.json", old)
-    split = budget_chunks(segments, max(128, target_tokens - 400), model, include_metadata=True)
+    split = budget_chunks(segments, max(128, target_tokens - 400), model, include_metadata=True,
+                          max_segments=settings["max_primary_segments"])
     state = {"version": PIPELINE_VERSION, "source_hash": fingerprint, "generation": generation_id,
              "settings": settings, "estimator": split["estimator"], "tasks": {}, "levels": [],
              "created_at": time.time(), "assembled": None}
@@ -140,14 +145,33 @@ def prepare(result_path, target_tokens=8000, synthesis_tokens=24000, model=None)
     for index, chunk in enumerate(split["chunks"]):
         task_id = f"extract-{index:04d}"
         task = add_task(state, generation, task_id, "extract", {
-            **chunk, "output_budget": 6000, "worker_contract": settings["worker_contract"]})
+            **chunk, "output_budget": 8000, "evidence_content_budget": 6000,
+            "worker_contract": settings["worker_contract"]})
         previous = (old or {}).get("tasks", {}).get(task_id) if (old or {}).get("version") == PIPELINE_VERSION else None
-        if previous and previous.get("input_hash") == task["input_hash"] and previous.get("status") == "complete":
+        compatible = bool(previous and previous.get("input_hash") == task["input_hash"])
+        if previous and not compatible:
             try:
-                validate_task(previous)
-                shutil.copy2(previous["output"], task["output"])
-            except (ValueError, KeyError, TypeError, OSError):
+                exclude = {"output_budget", "evidence_content_budget"}
+                old_input, new_input = read(previous["input"]), read(task["input"])
+                compatible = ({k: v for k, v in old_input.items() if k not in exclude}
+                              == {k: v for k, v in new_input.items() if k not in exclude})
+            except (OSError, ValueError, TypeError):
                 pass
+        if previous and compatible:
+            task["attempts"] = previous.get("attempts", 0)
+            task["migrated_from"] = previous["input"]
+            if previous.get("status") == "complete" or (previous.get("error", "").startswith("Evidence output exceeds budget")
+                                                        and Path(previous["output"]).is_file()):
+                try:
+                    shutil.copy2(previous["output"], task["output"])
+                    validate_task(task)
+                except (ValueError, KeyError, TypeError, OSError) as exc:
+                    task["error"] = str(exc)
+                    task["status"] = "blocked" if task["attempts"] >= 3 else "pending"
+            else:
+                task["status"] = "blocked" if task["attempts"] >= 3 else "pending"
+                if previous.get("error"):
+                    task["error"] = previous["error"]
         task_ids.append(task_id)
     state["levels"].append(task_ids)
     write(generation / "chunks.json", [{"task_id": key, "input": state["tasks"][key]["input"],
@@ -159,6 +183,14 @@ def prepare(result_path, target_tokens=8000, synthesis_tokens=24000, model=None)
 
 def normalized(text):
     return re.sub(r"\s+", "", text)
+
+
+def unseen_proper_names(text, source_text):
+    """Flag source-absent composite names; independent review may approve translations."""
+    candidates = re.findall(r"[\u4e00-\u9fff]{1,8}[·•][\u4e00-\u9fff]{1,12}|\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b", text)
+    fold = lambda value: re.sub(r"[\s·•]", "", value).casefold()
+    source_value = fold(source_text)
+    return sorted({name for name in candidates if fold(name) not in source_value})
 
 
 def quote_matches(quote, start, end, segments):
@@ -189,6 +221,12 @@ def validate_task(task):
     output = read(task["output"])
     if not isinstance(output, dict):
         raise ValueError("Output must be an object")
+    audit_path = Path(task["output"]).parent / "semantic-review.json"
+    audit = read(audit_path) if audit_path.exists() else {}
+    audit_current = (audit.get("input_hash") == task["input_hash"]
+                     and audit.get("artifact_hash") == output_hash(task))
+    if audit_current and audit.get("status") == "failed":
+        raise ValueError("Semantic review failed: " + str(audit.get("reason", "source fidelity rejected")))
     if task["kind"] == "extract":
         segments = {s["id"]: s for s in payload["segments"]}
         complete_source = normalized("\n".join(s["text"] for s in payload["segments"]))
@@ -221,6 +259,11 @@ def validate_task(task):
                     raise ValueError(f"Missing evidence list: {field}")
         if tokens(output) > payload["output_budget"]:
             raise ValueError(f"Evidence output exceeds budget: {tokens(output)} UTF-8 bytes > {payload['output_budget']}; shorten quotes and wording")
+        if "evidence_content_budget" in payload:
+            content = [{key: value for key, value in item.items() if key not in {"id", "quote", "segment_ids"}}
+                       for item in items]
+            if tokens(content) > payload["evidence_content_budget"]:
+                raise ValueError(f"Evidence content exceeds budget: {tokens(content)} UTF-8 bytes > {payload['evidence_content_budget']}")
     else:
         if output.get("input_hash") != task["input_hash"]:
             raise ValueError("Output input_hash mismatch")
@@ -250,6 +293,10 @@ def validate_task(task):
             segments = read(payload["result"]["segments_path"])
             body_errors = []
             source_text = "\n".join(segment["text"] for segment in segments)
+            unknown_names = unseen_proper_names(body, source_text)
+            approved = set(audit.get("approved_name_translations", [])) if audit_current and audit.get("status") == "passed" else set()
+            if set(unknown_names) - approved:
+                body_errors.append("Source-absent proper names need independent review: " + ", ".join(sorted(set(unknown_names) - approved)))
             for url in re.findall(r"https?://[^\s<>\]\)]+", body):
                 if url not in source_text:
                     body_errors.append(f"Body URL is absent from transcript: {url}")
@@ -533,6 +580,7 @@ def assemble(result_path):
     header = f"# {'课程转录总结' if episode.get('source') == 'local_media' else '播客代听报告'}\n\n> 转录总结日期：{datetime.now().astimezone():%Y-%m-%d}\n\n## 基本信息\n\n| 字段 | 内容 |\n| --- | --- |\n"
     for label, value in (("节目", episode.get("show_title")), ("标题", episode.get("title")), ("链接", episode.get("url")), ("发布日期", episode.get("pub_date")), ("音频时长", episode.get("duration_minutes")), ("转录引擎", metadata.get("transcription", {}).get("model"))):
         header += f"| {label} | {cell(value)} |\n"
+    header += "\n> 引述时间采用原始转录片段起点，未额外推算句内起点；精度以原始分段为准。\n"
     archive = result.get("shownotes_archive") or {}
     notes = Path(archive["markdown_path"]) if archive.get("markdown_path") else None
     shownotes = rebase_markdown(notes.read_text(encoding="utf-8"), notes.parent, report.parent) if notes else "未提供 Show Notes。"
@@ -578,6 +626,13 @@ def validate_workflow(result):
                 if state["tasks"][key].get("output_hash") != expected:
                     raise ValueError("Stale downstream evidence")
         assembled = state.get("assembled") or {}
+        if result.get("require_semantic_review"):
+            writer = state["tasks"]["write"]
+            audit_path = Path(writer["output"]).parent / "semantic-review.json"
+            audit = read(audit_path) if audit_path.exists() else {}
+            if (audit.get("status") != "passed" or audit.get("input_hash") != writer["input_hash"]
+                    or audit.get("artifact_hash") != output_hash(writer)):
+                raise ValueError("Independent semantic review missing, failed or stale")
         if assembled.get("source_hash") != assembly_source_hash(result):
             raise ValueError("Metadata/Show Notes changed; reassemble before final verification")
         if assembled.get("report_hash") != digest(Path(result["report_path"]).read_text(encoding="utf-8")) or assembled.get("knowledge_hash") != digest(read(result["knowledge_path"])):

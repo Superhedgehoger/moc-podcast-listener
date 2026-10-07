@@ -13,6 +13,33 @@ spec.loader.exec_module(worker)
 
 
 class WorkerAdapterTests(unittest.TestCase):
+    def test_complete_excerpt_retains_full_sentence_without_fixed_length_cuts(self):
+        raw = "Earlier context。" + "x" * 170 + "actual quotation" + "important qualification。Next sentence。"
+        expected = "x" * 170 + "actual quotationimportant qualification。"
+        self.assertEqual(worker.complete_excerpt(raw, "actual quotation"), expected)
+        self.assertEqual(worker.complete_excerpt("Whole untimed segment without punctuation", "untimed segment"),
+                         "Whole untimed segment without punctuation")
+        with self.assertRaises(ValueError):
+            worker.complete_excerpt(raw, "fabricated")
+    def test_quote_locator_uses_matching_segment_not_nearby_time_tolerance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            source = {"segments": [
+                {"id": "s0", "start": 0, "end": 2, "text": "Earlier context."},
+                {"id": "s1", "start": 2, "end": 4, "text": "More context."},
+                {"id": "s2", "start": 4, "end": 6, "text": "Actual important statement. " + "x" * 180}]}
+            items = [{"id": "a", "quote": "Actual important statement.", "segment_ids": ["s0", "s1", "s2"]},
+                     {"id": "b", "quote": "Earlier context.", "segment_ids": ["s0"]},
+                     {"id": "c", "quote": "More context.", "segment_ids": ["s1"]}]
+            worker.write(path / "input.json", source)
+            worker.write(path / "output.json", {"items": items})
+            state = {"tasks": {"extract": {"input": str(path / "input.json"), "output": str(path / "output.json")}}}
+            payload = {"source_lookup": {"result": "fixture"}, "leaf_ids": ["extract:a", "extract:b", "extract:c"],
+                       "section_minimums": {"关键引述": 10}}
+            with patch("summary_workflow.load", return_value=(None, None, state)):
+                sources = worker.writer_sources(payload)
+            self.assertEqual(sources["verified_quotations"][0]["start"], 4)
+
     def test_preflight_accepts_legacy_workspace_without_launching_model(self):
         with tempfile.TemporaryDirectory() as tmp:
             generation = Path(tmp) / "generation"
@@ -45,6 +72,22 @@ class WorkerAdapterTests(unittest.TestCase):
         self.assertEqual(worker.parse_response('{"items":[]}'), {"items": []})
         self.assertEqual(worker.parse_response('```json\n{"items":[]}\n```'), {"items": []})
         for text in ('[]', '```json\n{}', 'Here is the result: {}'):
+            with self.assertRaises(ValueError):
+                worker.parse_response(text)
+
+    def test_only_redundant_closer_is_normalized_without_discarding_data(self):
+        notes = []
+        self.assertEqual(worker.parse_response('{"items":[{"claim":"source"}]}}', notes),
+                         {"items": [{"claim": "source"}]})
+        self.assertEqual(notes, ["removed_one_redundant_trailing_object_closer"])
+        notes = []
+        self.assertEqual(worker.parse_response('{"text":"same"},{"text":"same"}', notes), {"text": "same"})
+        self.assertEqual(notes, ["removed_identical_duplicate_complete_json_object"])
+        for text in ('{"items":[]', '{"items":[]} {"more":[]}', '{"items":[]}}}',
+                     '{"items":[]} ignored', '{"items":[],"items":[1]}', '{"a":{"x":1,"x":2}}'):
+            with self.assertRaises(ValueError):
+                worker.parse_response(text)
+        for text in ('{"text":"first"},{"text":"different"}', '{"value":0},{"value":false}'):
             with self.assertRaises(ValueError):
                 worker.parse_response(text)
 

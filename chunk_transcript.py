@@ -24,7 +24,7 @@ SENTENCE_END_RE = re.compile(r"[。！？!?]\s*")
 
 def budget_chunks(
     segments: Iterable[Mapping], target_tokens: int = 8000, model: str | None = None,
-    *, include_metadata: bool = False,
+    *, include_metadata: bool = False, max_segments: int | None = None,
 ) -> dict:
     """Pack ordered segments without changing their text or splitting them.
 
@@ -42,6 +42,8 @@ def budget_chunks(
     """
     if isinstance(target_tokens, bool) or not isinstance(target_tokens, int) or target_tokens <= 0:
         raise ValueError("target_tokens must be a positive integer")
+    if max_segments is not None and (type(max_segments) is not int or max_segments <= 0):
+        raise ValueError("max_segments must be a positive integer")
 
     estimator = "utf8_bytes_upper_bound"
     encoding = None
@@ -116,7 +118,8 @@ def budget_chunks(
         })
 
     for index, item in enumerate(prepared):
-        if current and estimate(source_text(current + [item])) > target_tokens:
+        if current and ((max_segments is not None and len(current) >= max_segments)
+                        or estimate(source_text(current + [item])) > target_tokens):
             finish()
             current = []
             first_index = index

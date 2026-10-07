@@ -84,8 +84,11 @@ Start the task first, then pass its `task.json` and the exact current model.
 The same validators and three-start ceiling apply. This adapter remains
 experimental: passing individual chunks does not verify whole-episode quality.
 Live testing also found semantic errors despite mechanical verification. Opted-in
-semantic-review results require a current independent audit. Large provenance
-lists still have an unresolved metadata-budget limitation; see the
+new writer inputs require a current independent audit. Short reference nodes
+keep transitive original evidence IDs in a hash-checked local registry instead
+of repeating them in model context. Sentence audits cap both source bytes and
+verdict rows, retain original parent timestamps, and resume hash-bound progress.
+Long-source audits still need full live validation and cost measurements; see the
 [validation record](VALIDATION-v4.17.0.md).
 Artifact-only verification cannot complete a job:
 `--require-report` is mandatory for that transition.

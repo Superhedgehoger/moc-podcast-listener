@@ -42,6 +42,39 @@ class BoundedWriterTests(unittest.TestCase):
     def setUp(self):
         self.payload, self.sources = fixture()
 
+    def test_node_body_and_original_leaf_knowledge_never_send_registry(self):
+        nodes = ["r0000", "r0001", "r0002"]
+        old = self.payload["leaf_ids"]
+        self.payload["leaf_ids"] = nodes
+        self.payload["reference_registry"] = {"path": "PRIVATE_REGISTRY", "sha256": "PRIVATE_HASH"}
+        for item, node in zip(self.payload["entries"][0]["evidence"]["items"], nodes):
+            item["evidence_ids"] = [node]
+        for item in self.sources["boundaries"] + self.sources["verified_quotations"]:
+            item["evidence_id"] = nodes[old.index(item["evidence_id"])]
+        leaves = [f"extract-0000:original-{i}" for i in range(6)]
+        self.sources["knowledge_claims"] = [{"claim": f"Original extraction claim {i}", "evidence_ids": [leaf],
+                                              "limitations": ["Source qualification"]} for i, leaf in enumerate(leaves)]
+        self.sources["knowledge_boundaries"] = [{"evidence_id": leaf, "start": i * 10, "end": i * 10 + 8}
+                                                  for i, leaf in enumerate(leaves)]
+        requests = writer.plan(self.payload, self.sources)
+        for request in requests:
+            prompt = request["prompt"] or ""
+            self.assertNotIn("PRIVATE_REGISTRY", prompt)
+            self.assertNotIn("PRIVATE_HASH", prompt)
+            if request["kind"] != "knowledge":
+                self.assertNotIn("extract-0000:original", prompt)
+        knowledge = json.loads(requests[-1]["prompt"].split("\nINPUT DATA:\n")[1])
+        self.assertEqual(knowledge["claims"], self.sources["knowledge_claims"])
+        self.assertEqual(knowledge["boundaries"], self.sources["knowledge_boundaries"])
+        coverage = writer.coverage_request(self.payload, self.sources)
+        self.assertEqual(coverage["leaf_ids"], nodes)
+        self.assertNotIn("extract-0000:original", coverage["prompt"])
+        for count in (0, 5, 13):
+            sources = copy.deepcopy(self.sources)
+            sources["knowledge_claims"] = sources["knowledge_claims"][:count] if count < 6 else sources["knowledge_claims"] * 3
+            with self.assertRaisesRegex(ValueError, "6-12 original"):
+                writer.plan(self.payload, sources)
+
     def test_independent_requests_preserve_nine_sections_and_budget(self):
         before = copy.deepcopy((self.payload, self.sources))
         requests = writer.plan(self.payload, self.sources)

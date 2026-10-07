@@ -13,6 +13,8 @@ def main():
     parser.add_argument("result", help="Absolute path to result.json (task.json for check)")
     parser.add_argument("--task")
     parser.add_argument("--evidence")
+    parser.add_argument("--offset", type=int, default=0)
+    parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--reason", default="")
     parser.add_argument("--target-tokens", type=int, default=8000)
     parser.add_argument("--synthesis-tokens", type=int, default=24000)
@@ -28,7 +30,7 @@ def main():
         elif args.command == "locate":
             if not args.evidence:
                 parser.error("--evidence required")
-            value = locate(args.result, args.evidence)
+            value = locate(args.result, args.evidence, args.offset, args.limit)
         elif args.command in {"start", "fail"}:
             if not args.task:
                 parser.error("--task required")

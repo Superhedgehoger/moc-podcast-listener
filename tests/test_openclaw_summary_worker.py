@@ -1,8 +1,10 @@
 """Adapter contracts only; these tests do not invoke a model."""
 import importlib.util
 import json
+import stat
 from pathlib import Path
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +15,233 @@ spec.loader.exec_module(worker)
 
 
 class WorkerAdapterTests(unittest.TestCase):
+    def running_writer_task(self, path, required=True):
+        worker.write(path / "input.json", {"semantic_review_required": required})
+        task = {"id": "write", "kind": "write", "status": "running", "attempts": 1,
+                "workspace": str(path), "input": str(path / "input.json"),
+                "output": str(path / "output.json"), "input_hash": "offline"}
+        worker.write(path / "task.json", task)
+        return path / "task.json"
+
+    def test_default_review_writer_isolates_settings_and_cleans_up_on_success_or_failure(self):
+        # Private-config lifecycle contracts only; dispatch is mocked, not quality-tested.
+        for fail in (False, True):
+            with self.subTest(fail=fail), tempfile.TemporaryDirectory() as tmp:
+                home = Path(tmp)
+                task_path = self.running_writer_task(home)
+                installed = home / ".openclaw/openclaw.json"
+                original = {"models": {"providers": {"provider": {"baseUrl": "https://offline.invalid", "apiKey": "fixture",
+                                          "models": [{"id": "exact", "contextWindow": 128000, "maxTokens": 6000}]}}},
+                            "agents": {"defaults": {"model": {"primary": "provider/exact", "fallbacks": []},
+                                                   "contextTokens": 64000}},
+                            "tools": {"profile": "coding", "allow": ["read"], "deny": ["exec"]},
+                            "other": {"preserve": True}}
+                worker.write(installed, original)
+                before, mode = installed.read_bytes(), installed.stat().st_mode
+                seen = []
+
+                def dispatch(task, model, config, timeout):
+                    private = Path(config)
+                    seen.append(private)
+                    self.assertNotEqual(private.resolve(), installed.resolve())
+                    self.assertEqual(stat.S_IMODE(private.stat().st_mode), 0o600)
+                    expected = {**original, "tools": {**original["tools"], "deny": ["*"]}}
+                    self.assertEqual(worker.read(private), expected)
+                    self.assertEqual((model, timeout), ("provider/exact", 27))
+                    if fail:
+                        raise ValueError("Synthetic producer/reviewer failure")
+                    return {"ok": True}
+
+                with patch.object(worker.Path, "home", return_value=home), \
+                        patch.object(worker, "_run_writer", side_effect=dispatch), \
+                        patch.object(worker.subprocess, "Popen") as launch:
+                    if fail:
+                        with self.assertRaisesRegex(ValueError, "Synthetic"):
+                            worker.run(task_path, "provider/exact", timeout=27)
+                    else:
+                        self.assertTrue(worker.run(task_path, "provider/exact", timeout=27)["ok"])
+                    launch.assert_not_called()
+                self.assertEqual(len(seen), 1)
+                self.assertFalse(seen[0].exists())
+                self.assertEqual(installed.read_bytes(), before)
+                self.assertEqual(installed.stat().st_mode, mode)
+
+    def test_explicit_unsafe_configs_fail_before_writer_dispatch(self):
+        for unsafe in ("global", "global_symlink", "enabled_tools", "string_deny", "exposed"):
+            with self.subTest(unsafe=unsafe), tempfile.TemporaryDirectory() as tmp:
+                home = Path(tmp)
+                task_path = self.running_writer_task(home)
+                installed = home / ".openclaw/openclaw.json"
+                worker.write(installed, {"tools": {"deny": ["*"]}})
+                installed.chmod(0o600)
+                explicit = home / "private.json"
+                if unsafe == "global":
+                    explicit = installed
+                elif unsafe == "global_symlink":
+                    explicit.symlink_to(installed)
+                else:
+                    denied = [] if unsafe == "enabled_tools" else "*" if unsafe == "string_deny" else ["*"]
+                    worker.write(explicit, {"tools": {"deny": denied}})
+                    explicit.chmod(0o644 if unsafe == "exposed" else 0o600)
+                before = installed.read_bytes()
+                with patch.object(worker.Path, "home", return_value=home), patch.object(worker, "_run_writer") as dispatch, \
+                        patch.object(worker, "invoke") as invoke, patch.object(worker.subprocess, "Popen") as launch:
+                    with self.assertRaises(ValueError):
+                        worker.run(task_path, "provider/exact", config=str(explicit))
+                    dispatch.assert_not_called()
+                    invoke.assert_not_called()
+                    launch.assert_not_called()
+                self.assertEqual(installed.read_bytes(), before)
+
+    def test_explicit_safe_config_is_forwarded_unchanged_and_not_deleted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            task_path = self.running_writer_task(path)
+            config = path / "private.json"
+            worker.write(config, {"tools": {"deny": ["*"]}, "models": {"preserve": True}})
+            config.chmod(0o600)
+            before = config.read_bytes()
+            with patch.object(worker, "_run_writer", return_value={"ok": True}) as dispatch:
+                worker.run(task_path, "provider/exact", config=str(config))
+            self.assertEqual(dispatch.call_args.args[1:3], ("provider/exact", str(config)))
+            self.assertEqual(config.read_bytes(), before)
+            self.assertEqual(stat.S_IMODE(config.stat().st_mode), 0o600)
+
+    def test_legacy_writer_does_not_read_global_or_create_implicit_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            task_path = self.running_writer_task(path, required=False)
+            with patch.object(worker.Path, "home", side_effect=AssertionError("Must not inspect global config")), \
+                    patch.object(worker.tempfile, "NamedTemporaryFile") as create, \
+                    patch.object(worker, "_run_writer", return_value={"ok": True}) as dispatch:
+                worker.run(task_path, "provider/exact")
+                self.assertIsNone(dispatch.call_args.args[2])
+                create.assert_not_called()
+
+    def test_missing_or_invalid_default_config_fails_before_dispatch_without_fallback(self):
+        for settings in (None, [], {"tools": "invalid"}):
+            with self.subTest(settings=settings), tempfile.TemporaryDirectory() as tmp:
+                home = Path(tmp)
+                task_path = self.running_writer_task(home)
+                if settings is not None:
+                    worker.write(home / ".openclaw/openclaw.json", settings)
+                with patch.object(worker.Path, "home", return_value=home), patch.object(worker, "_run_writer") as dispatch, \
+                        patch.object(worker.tempfile, "NamedTemporaryFile") as create:
+                    with self.assertRaises((ValueError, OSError)):
+                        worker.run(task_path, "provider/exact")
+                    dispatch.assert_not_called()
+                    create.assert_not_called()
+
+    def test_temporary_config_is_removed_when_serialization_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            task_path = self.running_writer_task(home)
+            worker.write(home / ".openclaw/openclaw.json", {"models": {"preserve": True}})
+            factory = worker.tempfile.NamedTemporaryFile
+            created = []
+            def tracked(*args, **kwargs):
+                stream = factory(*args, **kwargs)
+                created.append(Path(stream.name))
+                return stream
+            with patch.object(worker.Path, "home", return_value=home), \
+                    patch.object(worker.tempfile, "NamedTemporaryFile", side_effect=tracked), \
+                    patch.object(worker.json, "dump", side_effect=OSError("Synthetic serialization failure")), \
+                    patch.object(worker, "_run_writer") as dispatch:
+                with self.assertRaisesRegex(OSError, "serialization failure"):
+                    worker.run(task_path, "provider/exact")
+                dispatch.assert_not_called()
+            self.assertEqual(len(created), 1)
+            self.assertFalse(created[0].exists())
+
+    def test_default_private_config_is_shared_by_mocked_producers_and_reviewer(self):
+        # Full writer orchestration with synthetic prose, never live quality evidence.
+        helper_spec = importlib.util.spec_from_file_location("writer_fixture", ROOT / "tests/test_bounded_writer.py")
+        helper = importlib.util.module_from_spec(helper_spec)
+        helper_spec.loader.exec_module(helper)
+        payload, sources = helper.fixture()
+        payload["semantic_review_required"] = True
+        seen = []
+        def produce(task, workspace, prompt, model, config, timeout, directory):
+            seen.append(config)
+            self.assertEqual(model, "provider/exact")
+            self.assertEqual(worker.read(config)["tools"]["deny"], ["*"])
+            self.assertEqual(stat.S_IMODE(Path(config).stat().st_mode), 0o600)
+            data = json.loads(prompt.split("\nINPUT DATA:\n", 1)[1])
+            if "section" in data:
+                value = {"text": "x" * data["target_visible_chars"]}
+            elif "leaf_ids" in data:
+                value = {"items": [{"evidence_id": key, "section": "详细总结", "reason": "Synthetic claim-specific reason"}
+                                    for key in data["leaf_ids"]]}
+            else:
+                value = {"insights": [{"claim": "synthetic"} for _ in range(6)]}
+            return value, {"elapsed_seconds": 1, "estimated_prompt_tokens": 100}
+        def audit(task, payload, model, config, timeout, invoke, requests):
+            self.assertEqual(model, "provider/exact")
+            self.assertEqual(set(seen), {config})
+            self.assertTrue(Path(config).exists())
+            seen.append(config)
+            return {"status": "passed"}
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            task_path = self.running_writer_task(home)
+            worker.write(home / "input.json", payload)
+            installed = home / ".openclaw/openclaw.json"
+            worker.write(installed, {"models": {"preserve": True}})
+            before = installed.read_bytes()
+            with patch.object(worker.Path, "home", return_value=home), \
+                    patch.object(worker, "writer_sources", return_value=sources), \
+                    patch.object(worker, "invoke", side_effect=produce), \
+                    patch("scripts.semantic_review.run_review", side_effect=audit) as reviewer, \
+                    patch.object(worker, "validate_task"):
+                self.assertTrue(worker.run(task_path, "provider/exact")["ok"])
+                reviewer.assert_called_once()
+            self.assertGreater(len(seen), 2)
+            self.assertEqual(len(set(seen)), 1)
+            self.assertFalse(Path(seen[0]).exists())
+            self.assertEqual(installed.read_bytes(), before)
+
+    def test_opaque_nodes_boundaries_and_selected_original_knowledge(self):
+        # Registry API is mocked here; parent owns its hash/integrity tests.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            leaves = [f"extract-0000:item-{i}" for i in range(6)]
+            mapping = {"r0000": leaves[:3], "r0001": leaves[3:]}
+            segments = [{"id": f"s{i}", "start": i * 10, "end": i * 10 + 8,
+                         "text": f"Original mechanism {i} has a qualification。"} for i in range(6)]
+            items = [{"id": f"item-{i}", "claim": f"Original claim {i}",
+                      "quote": segments[i]["text"], "segment_ids": [f"s{i}"],
+                      "limitations": [f"Original limit {i}"]} for i in range(6)]
+            worker.write(path / "chunk.json", {"segments": segments})
+            worker.write(path / "extract.json", {"items": items})
+            state = {"tasks": {"extract-0000": {"input": str(path / "chunk.json"),
+                                                  "output": str(path / "extract.json")}}}
+            payload = {"leaf_ids": list(mapping), "reference_registry": {"path": "PRIVATE_REGISTRY", "sha256": "hash"},
+                       "source_lookup": {"result": "fixture"}, "section_minimums": {"关键引述": 10}}
+            registry = types.SimpleNamespace(load_registry=lambda p: mapping,
+                                             expand_refs=lambda p, refs: [leaf for ref in refs for leaf in mapping[ref]])
+            with patch.dict("sys.modules", {"reference_registry": registry}), patch("summary_workflow.load", return_value=(None, None, state)):
+                sources = worker.writer_sources(payload)
+            self.assertEqual(sources["boundaries"], [{"evidence_id": "r0000", "start": 0, "end": 28},
+                                                      {"evidence_id": "r0001", "start": 30, "end": 58}])
+            self.assertEqual([item["evidence_ids"] for item in sources["knowledge_claims"]], [[leaf] for leaf in leaves])
+            self.assertEqual([item["start"] for item in sources["knowledge_boundaries"]], [i * 10 for i in range(6)])
+            self.assertEqual([item["claim"] for item in sources["knowledge_claims"]], [f"Original claim {i}" for i in range(6)])
+            self.assertTrue(all(q["evidence_id"] in mapping for q in sources["verified_quotations"]))
+
+    def test_reduce_prompt_does_not_transmit_registry_or_expand_node_refs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            worker.write(path / "input.json", {"leaf_ids": ["r0000"],
+                         "reference_registry": {"path": "PRIVATE_REGISTRY", "sha256": "PRIVATE_HASH"}})
+            worker.write(path / "task.md", "Reduce nodes.\n\nInput: private path")
+            task = {"kind": "reduce", "input": str(path / "input.json"), "instruction": str(path / "task.md"),
+                    "output": str(path / "output.json"), "input_hash": "hash"}
+            prompt = worker.build_prompt(task)
+            self.assertIn("r0000", prompt)
+            self.assertNotIn("reference_registry", prompt)
+            self.assertNotIn("PRIVATE_REGISTRY", prompt)
+            self.assertNotIn("PRIVATE_HASH", prompt)
+
     def test_complete_excerpt_retains_full_sentence_without_fixed_length_cuts(self):
         raw = "Earlier context。" + "x" * 170 + "actual quotation" + "important qualification。Next sentence。"
         expected = "x" * 170 + "actual quotationimportant qualification。"
@@ -205,6 +434,60 @@ class WorkerAdapterTests(unittest.TestCase):
             self.assertEqual(calls.count("coverage"), 2)
             self.assertTrue((path / "writer-run-attempt-1.json").exists())
             self.assertTrue((path / "writer-run-attempt-2.json").exists())
+
+    def test_required_review_precedes_success_and_native_validation(self):
+        # Synthetic prose and mocked validators exercise ordering, not live quality.
+        from scripts import bounded_writer
+        helper_spec = importlib.util.spec_from_file_location("writer_fixture", ROOT / "tests/test_bounded_writer.py")
+        helper = importlib.util.module_from_spec(helper_spec)
+        helper_spec.loader.exec_module(helper)
+        payload, sources = helper.fixture()
+        payload["semantic_review_required"] = True
+        events = []
+
+        def produce(task, workspace, prompt, model, config, timeout, directory):
+            data = json.loads(prompt.split("\nINPUT DATA:\n", 1)[1])
+            if "section" in data:
+                value = {"text": "x" * data["target_visible_chars"]}
+            elif "leaf_ids" in data:
+                value = {"items": [{"evidence_id": key, "section": "详细总结", "reason": "Synthetic claim-specific reason"}
+                                    for key in data["leaf_ids"]]}
+            else:
+                value = {"insights": [{"claim": "synthetic"} for _ in range(6)]}
+            return value, {"elapsed_seconds": 1, "estimated_prompt_tokens": 100}
+
+        def audit(task, *args):
+            directory = Path(task["output"]).parent
+            self.assertTrue((directory / "body.md").exists())
+            self.assertTrue((directory / "knowledge.draft.json").exists())
+            events.append("review")
+            if len(events) == 1:
+                # The real gate has separate tests for selective invalidation.
+                raise ValueError("Semantic review failed: knowledge source mismatch")
+            return {"status": "passed"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            worker.write(path / "input.json", payload)
+            task = {"id": "write", "kind": "write", "attempts": 1, "workspace": tmp,
+                    "input": str(path / "input.json"), "input_hash": "synthetic", "output": str(path / "output.json")}
+            config = path / "private-config.json"
+            worker.write(config, {"tools": {"deny": ["*"]}})
+            config.chmod(0o600)
+            with patch.object(worker, "writer_sources", return_value=sources), patch.object(worker, "invoke", side_effect=produce), \
+                    patch("scripts.semantic_review.run_review", side_effect=audit), \
+                    patch.object(worker, "validate_task", side_effect=lambda task: events.append("validate")) as check:
+                with self.assertRaisesRegex(ValueError, "Semantic review failed"):
+                    worker.run_writer(task, "provider/model", str(config), 600)
+                check.assert_not_called()
+                # An unclassified semantic failure must not trigger the structural
+                # handler's keyword-based knowledge-cache deletion.
+                request = next(r for r in bounded_writer.plan(payload, sources) if r["kind"] == "knowledge")
+                key = worker.digest([request["kind"], request["name"]])[:16]
+                self.assertTrue((path / "parts" / key / "validated.json").exists())
+                task["attempts"] = 2
+                self.assertTrue(worker.run_writer(task, "provider/model", str(config), 600)["ok"])
+                self.assertEqual(events, ["review", "review", "validate"])
 
     def test_repair_prompt_excludes_valid_sections_and_unchanged_knowledge(self):
         with tempfile.TemporaryDirectory() as tmp:

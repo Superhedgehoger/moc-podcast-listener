@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 import re
 from pathlib import Path
 import signal
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -139,7 +142,16 @@ def writer_sources(payload):
     result_path = payload["source_lookup"]["result"]
     _, _, state = load(result_path)
     refs, quotations, chunks, outputs = [], [], {}, {}
-    leaf_ids = payload["leaf_ids"]
+    nodes = payload["leaf_ids"]
+    if payload.get("reference_registry"):
+        from reference_registry import expand_refs, load_registry
+        load_registry(payload)
+        node_leaves = {node: expand_refs(payload, [node]) for node in nodes}
+        leaf_ids = list(dict.fromkeys(key for values in node_leaves.values() for key in values))
+    else:
+        node_leaves = {key: [key] for key in nodes}
+        leaf_ids = nodes
+    original_boundaries, originals = {}, {}
     # Three source-backed examples are enough for the mandatory quote section;
     # every leaf retains its boundaries for paraphrased knowledge evidence.
     chosen = {leaf_ids[i] for i in (0, len(leaf_ids) // 2, len(leaf_ids) - 1)}
@@ -154,6 +166,10 @@ def writer_sources(payload):
         segments = [s for s in chunk["segments"] if s["id"] in item["segment_ids"]]
         start, end = segments[0]["start"], segments[-1]["end"]
         refs.append({"evidence_id": key, "start": start, "end": end})
+        original_boundaries[key] = refs[-1]
+        originals[key] = {"claim": item.get("claim", item["quote"]), "quote": item["quote"], "evidence_ids": [key],
+                          **{field: item[field] for field in ("topics", "examples", "numbers", "limitations", "ambiguities")
+                             if item.get(field)}}
         if key in chosen or sum(len(x["quote"]) for x in quotations) < payload["section_minimums"]["关键引述"] + 30:
             quote_start = next((s["start"] for s in segments
                                 if normalized(item["quote"]) in normalized(s["text"])), None)
@@ -176,7 +192,19 @@ def writer_sources(payload):
                 raise ValueError(f"No contiguous quote excerpt for {key}")
             excerpt = complete_excerpt(raw, item["quote"])
             quotations.append({"evidence_id": key, "start": quote_start, "end": end, "quote": excerpt})
-    return {"boundaries": refs, "verified_quotations": quotations}
+    boundaries = [{"evidence_id": node,
+                   "start": min(original_boundaries[key]["start"] for key in keys),
+                   "end": max(original_boundaries[key]["end"] for key in keys)}
+                  for node, keys in node_leaves.items()]
+    for quote in quotations:
+        original = quote["evidence_id"]
+        quote["original_evidence_id"] = original
+        quote["evidence_id"] = next(node for node, keys in node_leaves.items() if original in keys)
+    count = min(12, len(leaf_ids))
+    selected = [leaf_ids[round(i * (len(leaf_ids) - 1) / max(1, count - 1))] for i in range(count)]
+    return {"boundaries": boundaries, "verified_quotations": quotations,
+            "knowledge_claims": [originals[key] for key in selected],
+            "knowledge_boundaries": [original_boundaries[key] for key in selected]}
 
 
 def build_prompt(task):
@@ -209,6 +237,7 @@ def build_prompt(task):
                                for i, s in enumerate(payload["segments"])],
                    "context": [s["text"] for s in payload.get("context_segments", [])]}
     elif task["kind"] == "reduce":
+        payload = {key: value for key, value in payload.items() if key != "reference_registry"}
         instruction = Path(task["instruction"]).read_text(encoding="utf-8").split("\n\nInput:")[0]
         prompt = common + instruction + "\nNo file writes: return the output object instead; the host saves and verifies it.\n"
         if task["kind"] == "extract":
@@ -219,7 +248,7 @@ def build_prompt(task):
     else:
         sources = writer_sources(payload)
         # Paths are validator inputs, not material the writer should copy/read.
-        payload = {k: v for k, v in payload.items() if k not in {"result", "report_workflow", "knowledge_workflow", "source_lookup"}}
+        payload = {k: v for k, v in payload.items() if k not in {"result", "report_workflow", "knowledge_workflow", "source_lookup", "reference_registry"}}
         payload["source_evidence"] = sources
         payload["section_targets"] = {key: max(minimum + 60, int(minimum * 1.3))
                                       for key, minimum in payload["section_minimums"].items()}
@@ -274,7 +303,7 @@ def build_prompt(task):
     return prompt
 
 
-def save_response(task, response):
+def save_response(task, response, validate=True):
     directory = Path(task["output"]).parent
     if task["kind"] == "extract" and "covered_indices" in response:
         response = expand_extraction(read(task["input"]), response)
@@ -289,7 +318,8 @@ def save_response(task, response):
                         raise ValueError(f"Invalid repair {key}")
                     write(directory / name, response[key])
             write(task["output"], {"input_hash": task["input_hash"]})
-            validate_task(task)
+            if validate:
+                validate_task(task)
             return
         if not isinstance(response.get("body"), str) or not isinstance(response.get("knowledge"), dict) or not isinstance(response.get("coverage"), dict):
             raise ValueError("Writer must return body, knowledge and coverage")
@@ -298,7 +328,8 @@ def save_response(task, response):
         write(directory / "coverage.json", response["coverage"])
         response = {"input_hash": task["input_hash"]}
     write(task["output"], response)
-    validate_task(task)
+    if validate:
+        validate_task(task)
 
 
 def preflight(task):
@@ -312,7 +343,7 @@ def preflight(task):
         prompt = max((item["prompt"] for item in requests if item["prompt"]), key=lambda value: len(value.encode("utf-8")))
     else:
         prompt = build_prompt(task)
-    budget = 10000 if task["kind"] == "extract" else 24000
+    budget = 10000 if task["kind"] == "extract" else 23000
     estimate = len(prompt.encode("utf-8"))
     if estimate > budget:
         raise ValueError(f"Worker prompt estimate {estimate} exceeds {budget}; reduce task input")
@@ -321,7 +352,7 @@ def preflight(task):
 
 def invoke(task, workspace, prompt, model, config, timeout, directory):
     estimate = len(prompt.encode("utf-8"))
-    limit = 10000 if task["kind"] == "extract" else 24000
+    limit = 10000 if task["kind"] == "extract" else 23000
     if estimate > limit:
         raise ValueError(f"Worker prompt estimate {estimate} exceeds {limit}; no model call made")
     write(directory / "one-shot-request.txt", prompt)
@@ -366,7 +397,49 @@ def invoke(task, workspace, prompt, model, config, timeout, directory):
     return response, record
 
 
+@contextmanager
+def writer_config(payload, config):
+    if not payload.get("semantic_review_required"):
+        yield config
+        return
+    installed = Path.home() / ".openclaw/openclaw.json"
+    if config is not None:
+        path = Path(config)
+        if path.resolve() == installed.resolve():
+            raise ValueError("Reviewed writer requires a private config, not the installed global config")
+        settings = read(path)
+        tools = settings.get("tools") if isinstance(settings, dict) else None
+        denied = tools.get("deny") if isinstance(tools, dict) else None
+        if not isinstance(denied, list) or "*" not in denied:
+            raise ValueError("Reviewed writer private config requires tools.deny=['*']; no model call made")
+        if stat.S_IMODE(path.stat().st_mode) & 0o077:
+            raise ValueError("Reviewed writer private config must not be group/world accessible")
+        yield config
+        return
+    settings = read(installed)
+    if not isinstance(settings, dict) or not isinstance(settings.get("tools", {}), dict):
+        raise ValueError("Current OpenClaw config must be an object with object-valued tools")
+    settings["tools"] = {**settings.get("tools", {}), "deny": ["*"]}
+    path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix="openclaw-summary-",
+                                         suffix=".json", delete=False) as stream:
+            path = Path(stream.name)
+            os.fchmod(stream.fileno(), 0o600)
+            json.dump(settings, stream, ensure_ascii=False)
+            stream.write("\n")
+        yield str(path)
+    finally:
+        if path is not None:
+            path.unlink(missing_ok=True)
+
+
 def run_writer(task, model, config, timeout):
+    with writer_config(read(task["input"]), config) as private:
+        return _run_writer(task, model, private, timeout)
+
+
+def _run_writer(task, model, config, timeout):
     from scripts import bounded_writer
     payload = read(task["input"])
     sources = writer_sources(payload)
@@ -377,12 +450,13 @@ def run_writer(task, model, config, timeout):
     if repair_path.exists():
         repair = read(repair_path)
         for request in requests:
-            name = request.get("section", request["name"])
+            name = request["name"]
             note = repair.get("sections", {}).get(name) if request["kind"] != "knowledge" else repair.get("knowledge")
             if note and request["prompt"]:
-                note = str(note).encode("utf-8")[:500].decode("utf-8", errors="ignore")
                 request["prompt"] += "\nIndependent source-fidelity rejection to repair:\n" + str(note)
                 request["estimated_bytes"] = len(request["prompt"].encode("utf-8"))
+                if request["estimated_bytes"] > 23000:
+                    raise ValueError("Source-supported semantic repair cannot fit 23000 UTF-8 bytes")
     sections, metrics = {}, []
     config_path = Path(config) if config else Path.home() / ".openclaw/openclaw.json"
     config_hash = digest(read(config_path)) if config_path.exists() else None
@@ -446,7 +520,8 @@ def run_writer(task, model, config, timeout):
             metrics[-1]["validation_error"] = str(exc)
             write(rejection, {"error": str(exc)})
             raise
-        write(cache, {"input_hash": expected, "output_hash": digest(value), "value": value})
+        write(cache, {"input_hash": expected, "output_hash": digest(value), "value": value,
+                      "sessionId": record.get("sessionId")})
         rejection.unlink(missing_ok=True)
         return value
 
@@ -466,13 +541,24 @@ def run_writer(task, model, config, timeout):
                 knowledge = dispatch(request)
         sections["详细总结"] = "\n\n".join(detail_pieces)
         coverage_requests = []
+        semantic_rejection = False
         try:
             body = bounded_writer.assemble_sections(sections, payload, sources)
             coverage = {"items": []}
             coverage_requests = bounded_writer.coverage_requests(payload, sources, sections)
             for request in coverage_requests:
                 coverage["items"].extend(dispatch(request)["items"])
-            save_response(task, {"body": body, "knowledge": knowledge, "coverage": coverage})
+            if payload.get("semantic_review_required"):
+                from scripts.semantic_review import run_review
+                save_response(task, {"body": body, "knowledge": knowledge, "coverage": coverage}, validate=False)
+                try:
+                    run_review(task, payload, model, config, timeout, invoke, requests)
+                except (ValueError, OSError, KeyError, TypeError):
+                    semantic_rejection = True
+                    raise
+                validate_task(task)
+            else:
+                save_response(task, {"body": body, "knowledge": knowledge, "coverage": coverage})
         except ValueError as exc:
             message = str(exc)
             affected = [request for request in requests + coverage_requests if (
@@ -482,7 +568,7 @@ def run_writer(task, model, config, timeout):
                     request.get("section", request["name"]) in message or any(url in sections[request.get("section", request["name"])]
                     for url in re.findall(r"https?://[^\s;]+", message))))) ]
             # Unclassified/source failures remain explicit; do not regenerate unrelated artifacts.
-            for request in affected:
+            for request in ([] if semantic_rejection else affected):
                 key = digest([request["kind"], request["name"]])[:16]
                 part = directory / "parts" / key
                 (part / "validated.json").unlink(missing_ok=True)

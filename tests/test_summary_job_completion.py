@@ -158,6 +158,9 @@ class SummaryJobCompletionTests(unittest.TestCase):
             }],
         })
         save(writer["output"], {"input_hash": writer["input_hash"]})
+        # Synthetic audit fixture exercises the gate, not real semantic quality.
+        save(directory / "semantic-review.json", {"status": "passed", "input_hash": writer["input_hash"],
+             "artifact_hash": workflow.output_hash(writer), "fixture_only": True})
         workflow.validate_task(writer)
         self.assertEqual(workflow.status(self.result_path)["status"], "ready_to_assemble")
         self.assert_pending()
@@ -203,6 +206,8 @@ class SummaryJobCompletionTests(unittest.TestCase):
 
     def test_required_semantic_review_cannot_be_bypassed_by_artifact_checks(self):
         self.complete_and_assemble()
+        writer = self.state()["tasks"]["write"]
+        (Path(writer["output"]).parent / "semantic-review.json").unlink()
         result = read(self.result_path)
         result["require_semantic_review"] = True
         save(self.result_path, result)

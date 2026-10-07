@@ -1,5 +1,21 @@
 # v4.17.0 验证记录 / Validation Record
 
+## 2026-10-08 修复续测（优先于下方历史记录）
+
+**代码回归 215 项通过；真实整集验收仍未通过，不合并 main 或覆盖 OpenClaw。** 本轮没有修改正式播客资料库、清空 blocked 次数、切换模型或伪造审核成功。
+
+- 已实现哈希引用注册表：4000 个原始证据 ID 的单组模型输入约 196 字节，全部原始 ID 留在本地并可展开回查。测试覆盖嵌套归并、注册表篡改、按依赖拒绝来源交换及重叠观点的遗漏记录。此前“尚未实现引用注册表”的说明仅属于历史状态。
+- 独立审稿拆为完整原句，原段时间戳不变；每批最多 8 个主句，原文不超过 8K 字节、完整提示不超过 23K 字节。JSON 模板逐项列出所需 ID，不猜补截断响应。审稿进度绑定实际提示、来源、模型和配置；修改某个稿件分片可以复用未变的审核，不复用已变的分片。
+- 修复审稿未完成时轮询可提前进入 ready_to_assemble 的漏洞；缺失、过期或失败的审核均不能完成写作，运行中保持 running，不触发重复派发。
+- 增加完整稿件分片的来源核查，禁止所有原文批次都把虚构主张推给“其他未知批次”；候选检索只提供原始完整句，支持不足必须失败。知识文件中的提及不能掩盖正文遗漏。这一新增核查仅完成模拟契约测试，尚未做真实整集验收。
+- 未传私有配置的新版写作任务自动使用权限 0600 的临时副本，仅禁止全部工具，保留模型、provider 和窗口设置；成功/失败均删除副本，不改全局配置。显式不安全配置在调用前拒绝。
+- 真实《灵动岛》续测使用新句数限制和旧合格写作片段缓存，代际 36f30033151004770905：3 次独立审稿共 286.16 秒、每次提示估算 20523 UTF-8 字节，依次因非 JSON、无原文支持的拒绝定位、虚假的稿件原样片段失败。写作 blocked / 3，0 个审核对通过，未装配新合格稿。源材料是复制的历史转录，未重新 ASR。
+- 上述实测进程使用审稿 v2。随后补充的合法 JSON 模板、稿件来源核查、完成状态保护及临时配置默认路径属于 v3 代码修复，215 项自动测试通过，不能冒称已经真实跑通。
+
+剩余验收：新版真实短稿、两小时访谈全稿、长学习播客全稿、正式课程实际目录和同模型 256K 环境。当前全面审核的源批次 × 稿件分片数量随长内容增加；独立规划探针的 800 句、3 分片需 300 次覆盖审核，另外还有稿件核查。必须进一步验证成本/效率，不能以这版结构测试宣称高效长课程支持。正式课程目录仍未提供，256K 仍未实测。
+
+English: 215 offline checks pass. Provenance registry, bounded review verdicts, resumable exact-prompt review, mandatory current audit before writer completion, artifact grounding, and private default writer config are implemented. The latest real short run exhausted three starts with invalid review responses; later v3 improvements have offline coverage only. No stable deployment, main merge, or full long-source quality claim is made.
+
 ## 2026-10-08 最新结论
 
 **正式发布仍未通过。** 本轮自动测试目前 159 项通过；真实短播客首次写作通过机械核验，但独立语义审查发现虚构论文作者和重要机制遗漏，已撤销测试作业的 completed 标记，恢复 awaiting_report。随后两次修复分别因重复 JSON 对象和详细小段不足门槛失败，原写作任务已 blocked / 3，未清空次数。独立审查文件保留在隔离测试目录，没有覆盖正式用户资料。

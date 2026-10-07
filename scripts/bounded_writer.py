@@ -369,6 +369,20 @@ def plan(payload, sources):
     count = min(12, len(claims))
     indices = sorted({round(i * (len(claims) - 1) / max(1, count - 1)) for i in range(count)})
     selected = [claims[index] for index in indices]
+    if "knowledge_claims" in sources or "knowledge_boundaries" in sources:
+        selected = sources.get("knowledge_claims")
+        boundaries = sources.get("knowledge_boundaries")
+        if not isinstance(selected, list) or not 6 <= len(selected) <= 12:
+            raise ValueError("Knowledge requires 6-12 original extraction items; no combined-claim fallback")
+        ids = [item["evidence_ids"][0] for item in selected if len(item.get("evidence_ids", [])) == 1
+               and item.get("claim")]
+        if len(ids) != len(selected) or len(set(ids)) != len(ids):
+            raise ValueError("Knowledge items must have unique original leaf IDs")
+        if not isinstance(boundaries, list) or {item["evidence_id"] for item in boundaries} != set(ids):
+            raise ValueError("Knowledge original boundaries missing")
+        _boundaries({"leaf_ids": ids}, {"boundaries": boundaries})
+    elif payload.get("reference_registry"):
+        raise ValueError("Opaque node references require original knowledge sources")
     selected_ids = {key for item in selected for key in item["evidence_ids"]}
     knowledge_data = {"claims": selected, "boundaries": [item for item in boundaries if item["evidence_id"] in selected_ids]}
     context = bounded_source_context(payload)

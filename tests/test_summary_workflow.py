@@ -451,7 +451,7 @@ class SummaryWorkflowTests(WorkflowFixture):
             self.assertEqual(task["kind"], "reduce")
             payload = read(task["input"])
             self.assertLessEqual(workflow.tokens(payload), 24000)
-            all_ids.extend(payload["leaf_ids"])
+            all_ids.extend(workflow.expand_refs(payload, payload["leaf_ids"]))
             output = {"input_hash": task["input_hash"], "items": [{
                 "claim": "Grouped topic", "details": "Preserved source-backed details",
                 "evidence_ids": payload["leaf_ids"],
@@ -475,7 +475,7 @@ class SummaryWorkflowTests(WorkflowFixture):
         workflow.status(self.result_path)
         writer = self.state()["tasks"]["write"]
         payload = read(writer["input"])
-        self.assertCountEqual(payload["leaf_ids"], expected)
+        self.assertCountEqual(workflow.expand_refs(payload, payload["leaf_ids"]), expected)
         self.assertLessEqual(workflow.tokens(payload), 24000)
         self.assertEqual(set(payload["dependencies"]), {task["id"] for task in reducers})
 
@@ -548,6 +548,24 @@ class WriterAssemblyUnitTests(WorkflowFixture):
         save(self.directory / "body.md", self.body)
         save(self.directory / "coverage.json", self.coverage)
         save(self.directory / "knowledge.draft.json", {"status": "complete", "unit_fixture": True})
+        save(self.directory / "semantic-review.json", {"status": "passed", "input_hash": self.writer["input_hash"],
+             "artifact_hash": workflow.output_hash(self.writer), "fixture_only": True})
+
+    def test_running_writer_waits_for_current_audit_and_never_exposes_assembly(self):
+        workflow.task_event(self.result_path, "write", "start")
+        self.write_draft()
+        (self.directory / "semantic-review.json").unlink()
+        for audit in (None, {"status": "passed", "input_hash": "stale", "artifact_hash": "stale"}):
+            if audit:
+                save(self.directory / "semantic-review.json", audit)
+            progress = workflow.status(self.result_path)
+            self.assertNotEqual(progress["status"], "ready_to_assemble")
+            self.assertEqual(self.state()["tasks"]["write"]["status"], "running")
+            self.assertFalse(progress["next_tasks"])
+            with self.assertRaisesRegex(ValueError, "Semantic review pending"):
+                workflow.validate_task(self.writer)
+            with self.assertRaisesRegex(ValueError, "incomplete"):
+                workflow.assemble(self.result_path)
 
     def test_unit_writer_references_are_in_workspace_and_archive_paths_are_not_inputs(self):
         workspace = Path(self.writer["workspace"])
@@ -584,6 +602,8 @@ class WriterAssemblyUnitTests(WorkflowFixture):
             workflow.assemble(self.result_path)
         self.assertFalse(Path(self.result["report_path"]).exists())
         self.write_draft()
+        save(self.directory / "semantic-review.json", {"status": "passed", "input_hash": self.writer["input_hash"],
+             "artifact_hash": workflow.output_hash(self.writer), "fixture_only": True})
         self.assertEqual(workflow.status(self.result_path)["status"], "ready_to_assemble")
         result = workflow.assemble(self.result_path)
         self.assertEqual(result["status"], "assembled")
@@ -626,6 +646,8 @@ class WriterAssemblyUnitTests(WorkflowFixture):
         save(self.directory / "coverage.json", {"items": [
             {"evidence_id": key, "section": "", "reason": "Duplicate background detail"}
         ] + self.coverage["items"][1:]})
+        save(self.directory / "semantic-review.json", {"status": "passed", "input_hash": self.writer["input_hash"],
+             "artifact_hash": workflow.output_hash(self.writer), "fixture_only": True})
         workflow.validate_task(self.writer)
 
     def test_unit_writer_requires_three_correctly_formatted_source_matched_quotes(self):
@@ -715,6 +737,8 @@ class NativeFinalVerificationTests(WorkflowFixture):
              "claim": "Synthetic source claim", "evidence": [{"kind": "quote", "quote": texts[0][:100],
              "start": 0, "end": 2, "confidence": "high", "speaker": "unconfirmed"}]}]})
         save(writer["output"], {"input_hash": writer["input_hash"]})
+        save(directory / "semantic-review.json", {"status": "passed", "input_hash": writer["input_hash"],
+             "artifact_hash": workflow.output_hash(writer), "fixture_only": True})
         workflow.assemble(self.result_path)
         final = workflow.listener().verify_result_artifacts(self.result, require_report=True)
         self.assertTrue(final["ok"], final["errors"])

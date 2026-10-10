@@ -491,6 +491,14 @@ class SummaryWorkflowTests(WorkflowFixture):
                 "claim": "Grouped topic", "details": "Preserved source-backed details",
                 "evidence_ids": payload["leaf_ids"],
             }], "omitted": []}
+            for invalid in ("not an object", {"claim": "Unsupported extra topic", "details": "No evidence", "evidence_ids": []},
+                            {"claim": "Malformed references", "details": "Invalid list", "evidence_ids": [["nested"]]}):
+                with self.subTest(invalid=invalid):
+                    malformed = copy.deepcopy(output)
+                    malformed["items"].append(invalid)
+                    save(task["output"], malformed)
+                    with self.assertRaisesRegex(ValueError, "Invalid reduced topic/evidence at item 1"):
+                        workflow.validate_task(task)
             bad = copy.deepcopy(output)
             bad["items"][0]["evidence_ids"] = payload["leaf_ids"][:-1]
             save(task["output"], bad)

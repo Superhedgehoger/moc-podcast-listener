@@ -110,6 +110,7 @@ def add_task(state, generation, task_id, kind, payload):
             stream.write("\nUse ONLY the short reference nodes listed in input leaf_ids for reduction evidence_ids, omissions and report coverage. The hashed registry preserves all original leaf IDs on disk; scripts resolve transitive provenance. Do not read the full registry into your context or invent original IDs. For source lookup use podcast-summary.py locate RESULT --evidence NODE --offset 0 --limit 5 and page only the required sources. A grouped claim does not imply every detail belongs to each original leaf. Knowledge evidence must use specific original source items and their actual segment ranges.\n")
     if kind == "write":
         with Path(task["instruction"]).open("a", encoding="utf-8") as stream:
+            stream.write("\nCopy name spellings verbatim from original source text even when ASR looks wrong; mark spelling unverified. Never combine given names and surnames from different spelling variants. An uncertain given name may be omitted.\n")
             stream.write("\nDirect quotations belong only in 关键引述, one per line as '- [HH:MM:SS]：verbatim text', at least three. No headings or commentary inside that section. Use paraphrases elsewhere. Retrieve the referenced original chunks to verify each quotation and its timestamp. For knowledge evidence also retrieve the original segments; do not infer timestamps from the thematic reduction.\n")
             stream.write("\nUse only original segment start/end boundaries for ALL report timestamps, rounded to whole seconds; coarse segments do not authorize sentence-level timestamps. Never read Show Notes or source metadata to populate body/resources or correct spellings. Only include URLs actually spoken/written in source segments. If no actionable resources occur, explain this limitation and discuss the named concepts from the transcript without inventing links. References are copied inside this workspace. Do not inspect validator source code or browse outside this task workspace; use the supplied check command and its diagnostics.\n")
             stream.write("\nThe result.transcript_path and result.segments_path fields are for the local validator ONLY: do not read them. Obtain source text solely via source_lookup and the returned chunk inside this workspace. On repair, do not regenerate valid sections or echo drafts into chat; make targeted file edits. Keep tool reads bounded and avoid repeatedly reading the full reference documents. A successful run requires all four output files, with output.json written last; a chat response is not a deliverable.\n")
@@ -127,7 +128,8 @@ def prepare(result_path, target_tokens=8000, synthesis_tokens=24000, model=None)
     base = workflow_dir(result)
     settings = {"target_tokens": target_tokens, "synthesis_tokens": synthesis_tokens, "model": model,
                 "chunk_format": "segment_json_ordinal_ids_v2", "worker_contract": "source_selection_v2",
-                "max_primary_segments": 96, "writer_format": "evidence_detail_pieces_v3",
+                "max_primary_segments": 96, "writer_format": "verbatim_name_evidence_pieces_v4",
+                "reduce_worker_contract": "topic_jsonl_records_v1",
                 "evidence_budget_format": "content6000_serialized8000_v3"}
     settings["reference_format"] = "opaque_records_v1"
     settings["quality_contract"] = "linear_source_grounding_v4"
@@ -295,17 +297,28 @@ def validate_task(task):
         if task["kind"] == "reduce":
             required = set(payload["leaf_ids"])
             seen = set()
-            for item in output.get("items", []):
+            items, omissions = output.get("items"), output.get("omitted")
+            if not isinstance(items, list) or not isinstance(omissions, list):
+                raise ValueError("Reduction items and omitted must be arrays")
+            for index, item in enumerate(items):
+                if not isinstance(item, dict):
+                    raise ValueError(f"Invalid reduced topic/evidence at item {index}: expected an object")
                 refs = item.get("evidence_ids", [])
-                if not refs or not set(refs) <= required or not item.get("claim") or not item.get("details"):
-                    raise ValueError("Invalid reduced topic/evidence")
+                if (not isinstance(refs, list) or not refs or any(not isinstance(ref, str) for ref in refs)
+                        or not set(refs) <= required or not isinstance(item.get("claim"), str)
+                        or not item["claim"].strip() or not item.get("details")):
+                    raise ValueError(f"Invalid reduced topic/evidence at item {index}: a claim, details and at least one supplied evidence ID are required")
                 seen.update(refs)
-            for omitted in output.get("omitted", []):
-                if omitted.get("evidence_id") not in required or not str(omitted.get("reason", "")).strip():
+            for omitted in omissions:
+                if (not isinstance(omitted, dict) or omitted.get("evidence_id") not in required
+                        or not isinstance(omitted.get("reason"), str) or not omitted["reason"].strip()):
                     raise ValueError("Invalid omission")
                 seen.add(omitted["evidence_id"])
-            if seen != required or tokens(output) > payload["output_budget"]:
-                raise ValueError("Reduction coverage incomplete or output over budget")
+            if seen != required:
+                missing = sorted(required - seen)
+                raise ValueError(f"Reduction coverage incomplete: {len(missing)} missing evidence IDs {missing[:8]}")
+            if tokens(output) > payload["output_budget"]:
+                raise ValueError(f"Reduction output over budget: {tokens(output)} > {payload['output_budget']} UTF-8 bytes; shorten details while retaining every evidence ID")
             if "reference_registry" in payload:
                 return expand_reduction(payload, output)
         else:
@@ -500,6 +513,7 @@ def status(result_path):
             for i, group in enumerate(groups):
                 key = f"reduce-{len(state['levels']):02d}-{i:04d}"
                 payload = {**registered_payload(group, generation, key), "output_budget": min(6000, limit // 3),
+                           "worker_reduce_contract": state["settings"].get("reduce_worker_contract", "legacy_object"),
                            "dependencies": {e["task_id"]: state["tasks"][e["task_id"]]["output_hash"] for e in group}}
                 if tokens(payload) > limit:
                     raise ValueError("One evidence bundle exceeds synthesis budget; shorten it or raise budget")

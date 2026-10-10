@@ -2,7 +2,7 @@
 
 ## 2026-10-10 修复与续测（当前状态，优先于历史记录）
 
-**234 项离线测试通过；真实整集最终验收仍进行中，不把局部分块通过当作发布通过。** 正式资料库和 OpenClaw 安装目录未修改，未合并 main。
+**237 项离线测试通过；真实整集最终验收仍进行中，不把局部分块通过当作发布通过。** 正式资料库和 OpenClaw 安装目录未修改，未合并 main。
 
 - 原文审稿改为“原文覆盖批次 + 稿件依据分片”，不再遍历全部交叉组合。两个方向均先保留每条断言最匹配的完整候选，再按证据和完整提示预算分组。完整原句、正文与知识条目均有无遗漏/重复检查；这只是处理完整性，不是事实准确率。
 - 独立复查发现并修复：说话人标签丢失、稿件分片所需原文超过预算、添加 ID 后将可分句段落误判为不可分；另补覆盖方向的证据预留回归。匿名说话人不会被推断为真实姓名。
@@ -13,8 +13,12 @@
 - 修复引述时间边界：起点只允许原段起点的秒级四舍五入，不再放宽到附近 8 秒；不允许追加无关后续片段来使过长的结束时间通过。
 - 《灵动岛》早期本轮审稿先因自相矛盾的问题清单、错误原文引文定位而被拒绝；后一次调用因执行沙箱无法解析服务地址失败。确认获准联网的环境可解析后继续，旧失败次数保留。没有修改全局模型配置或猜补不完整 JSON。
 - 用户已提供课程样本位置 `/Users/djy/Documents/播客总结`。只读检索未确认正式课程，已询问具体课程文件名；历史“目录未提供”不再适用。学习型播客不冒充正式课程。256K 同模型环境仍未验证。
+- 《平原上的摩西》16 个完整提取块全部通过。旧归纳首组三次分别因空证据主题、对象后追加字段、不完整 JSON 失败并 blocked；更换为逐条完整 JSON 记录及输入哈希完成标记，旧失败记录保留，16 块继续复用。新协议仍在真实验证，不宣称归纳或整稿已通过。
+- 新归纳协议前两组各第二次通过；第三组三次后 blocked，最后响应缺少 `r0`、`r19`、`r1a`、`r1b` 四个编号，不能把缺失完成标记视为单纯格式问题后宣称通过。最后一组未执行，访谈整稿未生成。
+- 写作增加逐字采用原文人名拼写、禁止合并不同变体的明确要求。完整单元素对象数组可有日志地解包，保留全部字段；多元素数组、部分 JSON 和不同对象不能通过此兼容处理。
+- 已只读查看本机模型：Agnes 3.0/2.5 Flash 标记可用；MiniMax M3 已配置、标称百万窗口，但运行可用性未确认；GPT-5.5 标记不可用。已询问是否授权三份测试材料发送至 MiniMax M3，未获授权前不执行新目的地的内容测试。没有改变日常默认模型。
 
-English: 234 offline tests pass. Source-aware linear audit planning, speaker preservation, ID-overhead splitting, exact source-address resolution, literal artifact binding for review findings and prompt-fingerprinted recovery are implemented. Real full-episode acceptance remains pending. The supplied course directory was inspected, but no formal course was identified. The existing installation and GitHub main are unchanged; 256K is not tested.
+English: 237 offline tests pass. All 16 interview extraction chunks and two reduction groups passed; the third group exhausted three attempts and its final response omitted four required evidence IDs. Source-aware linear auditing, exact source addresses, literal artifact binding, lossless singleton-object compatibility and verbatim source-name guidance are implemented. Full-episode acceptance remains pending. The supplied course directory contains no identified formal course. MiniMax M3 is configured but its availability and use of these test materials are not yet confirmed. The installation and GitHub main are unchanged; 256K is not tested.
 
 ## 2026-10-08 修复续测（优先于下方历史记录）
 

@@ -507,5 +507,44 @@ class WorkerAdapterTests(unittest.TestCase):
             self.assertNotIn("UNCHANGED_KNOWLEDGE", prompt)
 
 
+
+
+class ReductionRecordTests(unittest.TestCase):
+    def test_single_complete_object_wrapper_preserves_data_without_selecting_multiple_records(self):
+        value = {"text": "Verbatim body with quoted words", "evidence": ["r0", "r1"]}
+        diagnostics = []
+        self.assertEqual(worker.parse_response(json.dumps([value]), diagnostics), value)
+        self.assertEqual(diagnostics, ["unwrapped_single_complete_object_array"])
+        for text in (json.dumps([value, {"extra_evidence": "must not be dropped"}]), "[]", "[1]", json.dumps([value])[:-1]):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                worker.parse_response(text)
+
+    def test_complete_records_preserve_all_topic_and_omission_content(self):
+        rows = [{"record": "topic", "claim": "Source claim", "evidence_ids": ["r0", "r1"],
+                 "details": {"case": "Case with a newline\ninside its string", "number": 42}},
+                {"record": "omission", "evidence_id": "r2", "reason": "Repeated introduction"},
+                {"record": "complete", "input_hash": "bound-hash"}]
+        text = "\n".join(json.dumps(row) for row in rows)
+        parsed = worker.parse_reduce_records(text, "bound-hash")
+        self.assertEqual(parsed, {"input_hash": "bound-hash",
+                                  "items": [{k: v for k, v in rows[0].items() if k != "record"}],
+                                  "omitted": [{k: v for k, v in rows[1].items() if k != "record"}]})
+        self.assertEqual(worker.parse_reduce_records("```jsonl\n" + text + "\n```", "bound-hash"), parsed)
+
+    def test_partial_duplicate_misbound_or_unknown_records_cannot_complete(self):
+        topic = json.dumps({"record": "topic", "claim": "Source claim", "evidence_ids": ["r0"], "details": "Case"})
+        end = json.dumps({"record": "complete", "input_hash": "bound-hash"})
+        bad = [topic, topic + "\n" + end + "\n" + topic, end + "\n" + end,
+               topic + "\n" + end.replace("bound-hash", "different-hash"),
+               topic[:-1] + "\n" + end, "[]\n" + end,
+               '{"record":"topic","record":"topic"}\n' + end,
+               '{"record":"self_check","reason":"Looks valid"}\n' + end,
+               topic[:-1] + ',"extra_evidence":"Do not discard"}\n' + end,
+               "```jsonl\n" + topic + "\n" + end]
+        for text in bad:
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                worker.parse_reduce_records(text, "bound-hash")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,7 +2,7 @@
 
 ## 2026-10-10 修复与续测（当前状态，优先于历史记录）
 
-**237 项离线测试通过；真实整集最终验收仍进行中，不把局部分块通过当作发布通过。** 正式资料库和 OpenClaw 安装目录未修改，未合并 main。
+**238 项离线测试通过；真实整集最终验收仍进行中，不把局部分块通过当作发布通过。** 正式资料库和 OpenClaw 安装目录未修改，未合并 main。
 
 - 原文审稿改为“原文覆盖批次 + 稿件依据分片”，不再遍历全部交叉组合。两个方向均先保留每条断言最匹配的完整候选，再按证据和完整提示预算分组。完整原句、正文与知识条目均有无遗漏/重复检查；这只是处理完整性，不是事实准确率。
 - 独立复查发现并修复：说话人标签丢失、稿件分片所需原文超过预算、添加 ID 后将可分句段落误判为不可分；另补覆盖方向的证据预留回归。匿名说话人不会被推断为真实姓名。
@@ -17,8 +17,10 @@
 - 新归纳协议前两组各第二次通过；第三组三次后 blocked，最后响应缺少 `r0`、`r19`、`r1a`、`r1b` 四个编号，不能把缺失完成标记视为单纯格式问题后宣称通过。最后一组未执行，访谈整稿未生成。
 - 写作增加逐字采用原文人名拼写、禁止合并不同变体的明确要求。完整单元素对象数组可有日志地解包，保留全部字段；多元素数组、部分 JSON 和不同对象不能通过此兼容处理。
 - 已只读查看本机模型：Agnes 3.0/2.5 Flash 标记可用；MiniMax M3 已配置、标称百万窗口，但运行可用性未确认；GPT-5.5 标记不可用。已询问是否授权三份测试材料发送至 MiniMax M3，未获授权前不执行新目的地的内容测试。没有改变日常默认模型。
+- 《灵动岛》原样拼写写作代际 `e7a82d174cf3e1b6d66c` 三次后仍 blocked：依次出现单对象数组返回、加入源中没有的 `Rem Koolhaas`、不完整 JSON。后补的单对象数组兼容仅通过离线测试，不将这份整稿称为通过。
+- 长播客前 7/84 块通过，已在当前调用结束后恢复双并发继续。未生成该集报告。修复了未生成 output.json 时重试覆盖原始响应/耗时日志的问题，今后每次启动先归档旧调用日志；已丢失的历史耗时不猜补。
 
-English: 237 offline tests pass. All 16 interview extraction chunks and two reduction groups passed; the third group exhausted three attempts and its final response omitted four required evidence IDs. Source-aware linear auditing, exact source addresses, literal artifact binding, lossless singleton-object compatibility and verbatim source-name guidance are implemented. Full-episode acceptance remains pending. The supplied course directory contains no identified formal course. MiniMax M3 is configured but its availability and use of these test materials are not yet confirmed. The installation and GitHub main are unchanged; 256K is not tested.
+English: 238 offline tests pass. All 16 interview extraction chunks and two reduction groups passed; the third group exhausted three attempts with four required IDs missing. The short writer also exhausted three attempts, while 7/84 long-podcast chunks passed and two-worker extraction continues. Source-aware linear auditing, literal artifact binding, source-name guidance and failed-transport log preservation are implemented. Full-episode acceptance remains pending. No formal course is identified. MiniMax M3 use remains unapproved and its availability unconfirmed. The installation and GitHub main are unchanged; 256K is not tested.
 
 ## 2026-10-08 修复续测（优先于下方历史记录）
 

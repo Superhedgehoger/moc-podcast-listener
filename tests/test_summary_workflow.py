@@ -85,6 +85,23 @@ class WorkflowFixture(unittest.TestCase):
 
 
 class SummaryWorkflowTests(WorkflowFixture):
+    def test_retry_archives_failed_transport_logs_even_without_an_output_file(self):
+        workflow.prepare(self.result_path)
+        task = self.extracts()[0]
+        workflow.task_event(self.result_path, task["id"], "start")
+        directory = Path(task["output"]).parent
+        record = {"elapsed_seconds": 3.5, "estimated_prompt_tokens": 1024, "validation_error": "Incomplete JSON"}
+        save(directory / "worker-run.json", record)
+        save(directory / "worker-response.json", {"final": "partial response"})
+        save(directory / "one-shot-request.txt", "bounded source request")
+        self.assertFalse(Path(task["output"]).exists())
+        workflow.task_event(self.result_path, task["id"], "fail", "Incomplete JSON")
+        workflow.task_event(self.result_path, task["id"], "start")
+        self.assertEqual(read(directory / "attempt-1/worker-run.json"), record)
+        self.assertEqual(read(directory / "attempt-1/worker-response.json"), {"final": "partial response"})
+        self.assertEqual((directory / "attempt-1/one-shot-request.txt").read_text(), "bounded source request")
+        self.assertEqual(self.state()["tasks"][task["id"]]["attempts"], 2)
+
     def test_review_prompt_change_preserves_blocked_ledger_and_completed_extraction(self):
         from scripts import linear_review
         workflow.prepare(self.result_path)

@@ -575,10 +575,12 @@ def task_event(result_path, task_id, event, reason=""):
         output = Path(task["output"])
         if task.get("error"):
             write(output.parent / "repair.json", {"error": task["error"], "attempt": task["attempts"] + 1})
-        if output.exists():
+        archived_names = ("output.json", "body.md", "coverage.json", "knowledge.draft.json",
+                          "worker-run.json", "worker-response.json", "one-shot-request.txt")
+        if any((output.parent / name).exists() for name in archived_names):
             archive = output.parent / f"attempt-{task['attempts']}"
             archive.mkdir(exist_ok=True)
-            for name in ("output.json", "body.md", "coverage.json", "knowledge.draft.json"):
+            for name in archived_names:
                 path = output.parent / name
                 if path.exists():
                     if name == "output.json":

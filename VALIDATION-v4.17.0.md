@@ -1,5 +1,21 @@
 # v4.17.0 验证记录 / Validation Record
 
+## 2026-10-11 最终检查点（优先于下方历史记录）
+
+**238 项离线测试通过，真实整集验收未通过。** 所有本轮测试进程已结束，临时调用配置已清理。修复已推送草稿升级分支；GitHub main 与 OpenClaw 正式安装仍为原版本。
+
+| 样本 | 已通过 | 当前阻塞 |
+| --- | --- | --- |
+| 《灵动岛》 | 提取完成；部分正文已缓存 | 写作代际 `e7a82d174cf3e1b6d66c`，3 次后 blocked；最后返回不完整 JSON |
+| 《平原上的摩西》 | 16/16 提取块、2 个归纳组 | 第 3 个归纳组三次后 blocked；最后缺少 4 个必需证据编号，最后一组未执行 |
+| 《纵横四海 EP86》 | 31/84 提取块，实际双并发 | `extract-0029` 三次后 blocked；最后 `quote_ref=2:0` 不属于其声明的片段集合，52 块未执行 |
+
+三集均未生成本轮最终合格报告，也未标为 completed。复用的历史转录未重新进行 ASR，原资料库及个人笔记未改动。自动重试上限和全部失败状态保留，不以局部分块通过代替报告质量验收。
+
+剩余事项：获得可稳定产生合格证据及报告的模型测试结果，确认正式课程样本文件，并在可用环境中完成窗口验证。已询问 MiniMax M3 的三集材料外发授权，当前尚未收到确认；其模型可用性也未确认。不会将配置窗口或预算模拟宣称为实际容量压力测试。
+
+English: 238 offline tests pass, but no current full-episode acceptance passed. The short writer blocked after three attempts; the interview passed all 16 extraction chunks and two reductions before a reduction blocked; the long episode passed 31/84 chunks before an inconsistent quote reference exhausted three attempts. All processes stopped and private invocation configs were removed. The draft branch is updated; main and the installed Skill are unchanged. Alternative-model authorization, a formal course sample and window verification remain pending.
+
 ## 2026-10-10 修复与续测（当前状态，优先于历史记录）
 
 **238 项离线测试通过；真实整集最终验收仍进行中，不把局部分块通过当作发布通过。** 正式资料库和 OpenClaw 安装目录未修改，未合并 main。

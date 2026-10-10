@@ -33,7 +33,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, quote, urljoin, urlparse
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 import xml.etree.ElementTree as ET
 
@@ -93,6 +93,11 @@ def warn(msg: str) -> None:
 
 def error(msg: str) -> None:
     print(f"[ERROR] {msg}", file=sys.stderr)
+
+
+def keep_audio_enabled(args: Any) -> bool:
+    """Preserve source audio unless cleanup is explicitly requested."""
+    return bool(getattr(args, "keep_audio", False)) or os.environ.get("KEEP_AUDIO", "1") != "0"
 
 
 def run_command(
@@ -3681,6 +3686,74 @@ def target_summary_words(duration_minutes: float) -> int:
     return 4000
 
 
+REPORT_SYNTHESIS_SECTIONS = (
+    "内容摘要",
+    "内容大纲",
+    "核心观点",
+    "详细总结",
+    "关键洞察与证据",
+    "关键引述",
+    "背景与术语",
+    "实用资源",
+    "延伸思考与局限",
+)
+
+
+def report_section_minimums(duration_minutes: float) -> dict[str, int]:
+    """Coverage floors that reject short/template sections.
+
+    These are deliberately section-specific: a long Show Notes archive or a
+    large quote dump must not make a thin synthesis look complete.
+    """
+    if duration_minutes < 30:
+        return {
+            "内容摘要": 180,
+            "内容大纲": 180,
+            "核心观点": 300,
+            "详细总结": 700,
+            "关键洞察与证据": 300,
+            "关键引述": 250,
+            "背景与术语": 120,
+            "实用资源": 80,
+            "延伸思考与局限": 120,
+        }
+    if duration_minutes < 60:
+        return {
+            "内容摘要": 250,
+            "内容大纲": 250,
+            "核心观点": 450,
+            "详细总结": 1200,
+            "关键洞察与证据": 450,
+            "关键引述": 350,
+            "背景与术语": 150,
+            "实用资源": 100,
+            "延伸思考与局限": 180,
+        }
+    if duration_minutes < 90:
+        return {
+            "内容摘要": 300,
+            "内容大纲": 300,
+            "核心观点": 600,
+            "详细总结": 1800,
+            "关键洞察与证据": 600,
+            "关键引述": 450,
+            "背景与术语": 200,
+            "实用资源": 120,
+            "延伸思考与局限": 220,
+        }
+    return {
+        "内容摘要": 350,
+        "内容大纲": 350,
+        "核心观点": 750,
+        "详细总结": 2400,
+        "关键洞察与证据": 750,
+        "关键引述": 550,
+        "背景与术语": 250,
+        "实用资源": 150,
+        "延伸思考与局限": 250,
+    }
+
+
 def safe_filename(title: str, fallback: str) -> str:
     safe = re.sub(r'[/\\:*?"<>|#&%()\[\]{}+=@!~`;,\']', "", title).strip()
     safe = re.sub(r"\s+", " ", safe)
@@ -3766,6 +3839,10 @@ def build_agent_instruction(
     report_path = output_dir / "总结稿" / f"{combined_name}_详细总结.md"
     workflow_path = Path(__file__).with_name("references") / "report-workflow.md"
     knowledge_workflow_path = Path(__file__).with_name("references") / "knowledge-workflow.md"
+    low_context_path = Path(__file__).with_name("references") / "low-context-workflow.md"
+    summary_script = Path(__file__).with_name("podcast-summary.py").resolve()
+    result_target = str(job_result_path) if job_result_path else "<RESULT_JSON>"
+    summary_command = f'"{sys.executable}" "{summary_script}"'
     job_lines = ""
     verification_step = ""
     if job_id:
@@ -3780,7 +3857,7 @@ def build_agent_instruction(
             f'   "{sys.executable}" "{Path(__file__).resolve()}" '
             f'--output-dir "{output_dir}" --verify "{job_id}" --require-report\n'
         )
-    return f"""请按 SKILL.md 和报告工作流继续完成播客总结。
+    return f"""请按 SKILL.md 和小上下文工作流继续完成播客总结（summary_workflow_version=1）。
 
 输入文件：
 - 转录稿：{transcript_path}
@@ -3789,6 +3866,7 @@ def build_agent_instruction(
 - WebVTT 字幕：{vtt_path}
 - 元数据：{metadata_path}
 - 报告工作流：{workflow_path}
+- 小上下文调度工作流（主会话先读）：{low_context_path}
 - 知识与证据工作流：{knowledge_workflow_path}
 - 结构化知识：{knowledge_path}
 - 我的笔记（只读，不得覆盖）：{personal_notes_path}
@@ -3808,18 +3886,30 @@ def build_agent_instruction(
 - 嘉宾/说话人候选：{guests_text}
 
 执行要求：
-1. 读取转录稿和元数据。
-2. 若转录稿超过 30000 字，先运行分块辅助工具：
-   {chunk_command}
-3. 长转录稿逐块独立提取证据、实体、引述和时间戳；合并去重后只做一次正式整合，禁止每块重写整篇总结。
-4. 引述必须与转录稿一致，并尽量附时间戳。没有说话人证据时写“说话人未确认”，禁止猜测姓名。
-5. 按“报告工作流”文件生成报告；保留 Show Notes，并在「转录稿」章节介绍独立转录文件及其链接，禁止把完整转录正文复制进总结稿。
-6. 按“知识与证据工作流”把 `{knowledge_path}` 从草稿更新为 `complete`；每条关键洞察必须有可在 transcript/segments 中核验的引述或明确标注的转述。不得修改或覆盖 `{personal_notes_path}`。
+1. 主会话仅调度：只读本指令、小上下文工作流和紧凑状态；不得读取完整转录稿、全部 segments 或汇总所有证据到主会话。以下源文件路径只供脚本或独立工作会话使用。
+   `内容摘要`、`内容大纲`、`核心观点`、`详细总结`、`关键洞察与证据`、`关键引述`、`背景与术语`、`实用资源`、`延伸思考与局限`只能使用转录稿与 segments 作为内容来源。Show Notes 只在其独立归档章节中保留，禁止用 Show Notes 的简介、时间轴、资源或链接代替转录证据。
+2. 所有长度均先准备磁盘任务，再查询状态：
+   {summary_command} prepare "{result_target}"
+   {summary_command} status "{result_target}"
+   prepare 可用 --model 指定当前模型的 tokenizer；它不会启动推理或切换模型。
+3. 对 next_tasks 中每个任务先执行 start，再由宿主 sessions_spawn 或等价独立会话机制启动，最多并发 2 个，使用当前模型，不继承主会话全文：
+   {summary_command} start "{result_target}" --task TASK_ID
+   只传任务 instruction 路径；工作会话读取 task.md 和限定输入、写入产物，只回传路径和简短状态。脚本不调用模型 API。无独立会话能力则停在 awaiting_report 并说明阻塞，禁止退回主会话全文总结。
+   工作会话失败或中断时，先确认它已停止，再执行：
+   {summary_command} fail "{result_target}" --task TASK_ID --reason "失败原因"
+   每次完成后执行 status 校验产物并推进 extract/reduce/write；失败只修复对应任务或章节，每任务最多 3 次 start，blocked 时停止并说明问题。上游产物变化时 status 自动移除失效下游任务，仅在上游完整后重新生成；无需 restart，禁止无限重试或逐块重写整篇报告。
+4. 引述必须与转录稿一致；关键引述区至少三条，每行严格为 `- [HH:MM:SS]：原文`，不插入说明或子标题。其他正文区使用明确标注的转述。没有说话人证据时写“说话人未确认”，禁止猜测姓名。缺少时间戳时核心会阻塞：保留官方原文，先获取可靠时间对齐，禁止编造时间戳。单个不可分段落超预算时按错误提示处理，不得静默截断。
+5. 独立 write 会话按报告和知识工作流生成 body.md、knowledge.draft.json、coverage.json、output.json；内容摘要提供速读概览，但不得压缩或省略其余详细正文区。只按需回读特定原始分块，不能载入全文。标题、日期、基本信息、Show Notes 和转录链接由装配脚本生成。
+6. status 返回 ready_to_assemble 后执行：
+   {summary_command} assemble "{result_target}"
+   装配会写入 `{report_path}` 和 `{knowledge_path}`；每条关键洞察必须有可核验的引述或明确标注的转述。不得修改或覆盖 `{personal_notes_path}`。不得直接修改装配后的报告绕过状态校验；需要修改时修复工作会话产物再重新装配。
 7. 仅对 60 分钟以上、高风险主题或用户明确要求的深度版执行独立质检。
 8. 提交前确认：
-   - [ ] 包含「📋 基本信息」表格，所有字段已填写
+   - [ ] 包含「基本信息」表格，所有字段已填写
    - [ ] 标题后写有「转录总结日期：YYYY-MM-DD」，使用完成总结的本地日期而非节目发布日期
    - [ ] 核心观点包含具体证据、案例、数字或机制
+   - [ ] 九个总结正文区均仅来自 Transcript/segments；Show Notes 独有内容未进入正文
+   - [ ] 内容摘要、内容大纲、核心观点、详细总结、关键洞察与证据、关键引述、背景与术语、实用资源、延伸思考与局限分别达到按时长计算的覆盖门槛
    - [ ] 引述已核对原文，且未猜测说话人
    - [ ] 包含背景与术语、实用资源、延伸思考与局限
    - [ ] 正文字数 ≥ {target_words} 字（不含 Show Notes）
@@ -3829,7 +3919,7 @@ def build_agent_instruction(
    - [ ] 我的笔记.md 未被覆盖
    - [ ] 包含独立转录稿、segments、SRT、WebVTT 的相对链接，且未嵌入完整转录正文
 
-   写入最终目标文件：
+   由 assemble 写入最终目标文件（assembled 不等于 completed）：
    {report_path}
 {verification_step}
 """
@@ -4112,6 +4202,18 @@ def rebuild_human_index(output_dir: Path) -> Path:
     output_dir = output_dir.expanduser()
     package_root = output_dir / "资料"
     completion_times = report_completion_times(output_dir)
+    report_states: dict[str, tuple[float, str]] = {}
+    for result_path in (output_dir / ".jobs").glob("*/result.json"):
+        try:
+            tracked = read_json_object(result_path)
+            if tracked.get("mode") != "transcribe" or not tracked.get("report_path"):
+                continue
+            key = str(Path(tracked["report_path"]).expanduser().resolve())
+            stamp = result_path.stat().st_mtime
+            if stamp >= report_states.get(key, (0, ""))[0]:
+                report_states[key] = (stamp, str(tracked.get("job_status", "")))
+        except (OSError, ValueError, TypeError):
+            continue
     rows: list[dict[str, str]] = []
     for metadata_path in package_root.glob("*/metadata.json") if package_root.is_dir() else []:
         try:
@@ -4144,7 +4246,8 @@ def rebuild_human_index(output_dir: Path) -> Path:
                 "transcript_date": format_index_timestamp(transcript_time),
                 "show": escape_markdown_table_cell(episode.get("show_title") or "未知节目"),
                 "title": escape_markdown_table_cell(episode.get("title") or package_name),
-                "status": human_index_status(transcript_path, report_path, mode),
+                "status": ("待总结" if report_states.get(str(report_path.resolve()), (0, ""))[1] in {"awaiting_report", "failed"}
+                           else human_index_status(transcript_path, report_path, mode)),
                 "url": str(episode.get("url") or "").strip(),
                 "transcript": relative_output_path(transcript_path, output_dir)
                 if transcript_path.is_file()
@@ -4276,7 +4379,7 @@ class JobTracker:
             "options": {
                 "engine": getattr(args, "engine", None),
                 "model": getattr(args, "model", None),
-                "keep_audio": bool(getattr(args, "keep_audio", False)),
+                "keep_audio": keep_audio_enabled(args),
                 "force_transcribe": bool(getattr(args, "force_transcribe", False)),
                 "shownotes_assets": getattr(args, "shownotes_assets", None),
                 "link_snapshot": getattr(args, "link_snapshot", None),
@@ -4434,6 +4537,17 @@ class JobTracker:
             )
         self.persist()
 
+    def mark_report_pending(self, reason: str) -> None:
+        self.state.update(status="awaiting_report", current_phase="awaiting_report",
+                          progress=JOB_PHASE_PROGRESS["awaiting_report"], report_status="pending", error=reason)
+        self.state.pop("completed_at", None)
+        if self.result_path.is_file():
+            result = read_json_object(self.result_path)
+            result["job_status"] = "awaiting_report"
+            result.pop("report_verified_at", None)
+            atomic_write_text(self.result_path, json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+        self.persist()
+
 
 ACTIVE_JOB: JobTracker | None = None
 
@@ -4468,6 +4582,104 @@ def resolve_verify_target(output_dir: Path, target: str) -> tuple[Path, Path | N
         return candidate, job_path if job_path and job_path.is_file() else None
     job_dir = output_dir / ".jobs" / target
     return job_dir / "result.json", job_dir / "job.json"
+
+
+def parse_report_sections(report: str) -> dict[str, str]:
+    matches = list(re.finditer(r"(?m)^##\s+(.+?)\s*$", report))
+    sections: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(report)
+        sections[match.group(1).strip()] = report[match.end():end].strip()
+    return sections
+
+
+def visible_report_chars(value: str) -> int:
+    value = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", value)
+    value = re.sub(r"\[[^\]]*\]\([^)]*\)", "", value)
+    value = re.sub(r"[`#>*_|~-]", "", value)
+    return len(re.sub(r"\s+", "", value))
+
+
+def normalized_source_text(value: str) -> str:
+    return re.sub(r"\s+", "", value or "")
+
+
+def verify_report_synthesis(
+    report: str,
+    *,
+    transcript: str,
+    shownotes: str,
+    duration_minutes: float,
+) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    sections = parse_report_sections(report)
+    minimums = report_section_minimums(duration_minutes)
+
+    for name in REPORT_SYNTHESIS_SECTIONS:
+        body = sections.get(name)
+        if body is None:
+            errors.append(f"report is missing section: {name}")
+            continue
+        chars = visible_report_chars(body)
+        minimum = minimums[name]
+        if chars < minimum:
+            errors.append(f"report section is too short: {name}: {chars} < {minimum}")
+
+    summary_chars = sum(
+        visible_report_chars(sections.get(name, ""))
+        for name in REPORT_SYNTHESIS_SECTIONS
+    )
+    summary_minimum = target_summary_words(duration_minutes)
+    if summary_chars < summary_minimum:
+        errors.append(
+            f"report synthesis body is too short: {summary_chars} < {summary_minimum}"
+        )
+
+    transcript_normalized = normalized_source_text(transcript)
+    synthesis_normalized = normalized_source_text(
+        "\n".join(sections.get(name, "") for name in REPORT_SYNTHESIS_SECTIONS)
+    )
+    leaked_lines: list[str] = []
+    for raw_line in shownotes.splitlines():
+        line = raw_line.strip()
+        normalized = normalized_source_text(line)
+        if len(normalized) < 45:
+            continue
+        if normalized in synthesis_normalized and normalized not in transcript_normalized:
+            leaked_lines.append(line[:120])
+    if leaked_lines:
+        errors.append(
+            "report synthesis contains Show Notes-only text: "
+            + " | ".join(leaked_lines[:3])
+        )
+
+    quote_section = sections.get("关键引述", "")
+    timestamped = 0
+    matched = 0
+    for line in quote_section.splitlines():
+        if not re.search(r"\d{2}:\d{2}(?::\d{2})?", line):
+            continue
+        timestamped += 1
+        quote_match = re.search(r"(?:\)|）|\])\s*[：:]\s*(.+?)\s*$", line)
+        if not quote_match:
+            quote_match = re.search(r"\*\*\s*[：:]?\s*(.+?)\s*$", line)
+        if not quote_match:
+            continue
+        quote = quote_match.group(1).strip().strip('“”\"\'`*_ ')
+        quote = quote.replace("……", "").strip()
+        if len(normalized_source_text(quote)) >= 8 and normalized_source_text(quote) in transcript_normalized:
+            matched += 1
+    if timestamped < 3:
+        errors.append(f"report has too few timestamped quotations: {timestamped} < 3")
+    if matched < 3:
+        errors.append(f"report has too few transcript-matched quotations: {matched} < 3")
+
+    transcript_section = sections.get("转录稿", "")
+    if "<details>" in transcript_section or "<summary>" in transcript_section:
+        errors.append("report embeds the full transcript; keep only standalone artifact links")
+
+    return errors, warnings
 
 
 def verify_result_artifacts(
@@ -4536,6 +4748,7 @@ def verify_result_artifacts(
             warnings.extend(knowledge_verification.get("warnings") or [])
 
     archive = result.get("shownotes_archive") or {}
+    shownotes_markdown = ""
     shownotes_online_urls: list[str] = []
     if archive:
         markdown_path = check_file("shownotes_markdown", archive.get("markdown_path"))
@@ -4580,6 +4793,7 @@ def verify_result_artifacts(
                 errors.append(f"Show Notes manifest is invalid: {manifest_path}: {exc}")
         if markdown_path:
             markdown = markdown_path.read_text(encoding="utf-8")
+            shownotes_markdown = markdown
             if shownotes_online_urls and LINK_ARCHIVE_START not in markdown:
                 errors.append("Show Notes is missing the human-readable link archive")
             for online_url in shownotes_online_urls:
@@ -4587,9 +4801,10 @@ def verify_result_artifacts(
                 if online_url not in markdown and escaped_url not in markdown:
                     errors.append(f"Show Notes online link is missing: {online_url}")
             for raw_link in re.findall(r"!\[[^\]]*\]\((?:<)?([^)>]+)(?:>)?\)", markdown):
-                if urlparse(raw_link).scheme in {"http", "https"}:
+                parsed = urlsplit(raw_link)
+                if parsed.scheme or parsed.netloc or not parsed.path:
                     continue
-                image_path = (markdown_path.parent / raw_link).resolve()
+                image_path = (markdown_path.parent / unquote(parsed.path)).resolve()
                 if not image_path.is_file():
                     errors.append(f"Show Notes image link is broken: {raw_link}")
 
@@ -4630,13 +4845,57 @@ def verify_result_artifacts(
                     escaped_url = markdown_escape_url(online_url)
                     if online_url not in report and escaped_url not in report:
                         errors.append(f"report is missing Show Notes link: {online_url}")
-            for raw_link in re.findall(r"\[[^\]]+\]\((?:<)?([^)>]+)(?:>)?\)", report):
-                parsed = urlparse(raw_link)
-                if parsed.scheme or raw_link.startswith("#"):
+                transcript_text = (
+                    transcript_path.read_text(encoding="utf-8")
+                    if transcript_path
+                    else ""
+                )
+                episode_payload = metadata_payload.get("episode") or {}
+                duration_minutes = (
+                    float(episode_payload.get("duration_minutes") or 0.0)
+                    if isinstance(episode_payload, dict)
+                    else 0.0
+                )
+                if len(normalized_source_text(transcript_text)) >= 100:
+                    synthesis_errors, synthesis_warnings = verify_report_synthesis(
+                        report,
+                        transcript=transcript_text,
+                        shownotes=shownotes_markdown,
+                        duration_minutes=duration_minutes,
+                    )
+                    errors.extend(synthesis_errors)
+                    warnings.extend(synthesis_warnings)
+                    for artifact_name, artifact_path in (
+                        ("transcript", result.get("transcript_path")),
+                        ("segments", result.get("segments_path")),
+                        ("srt", result.get("srt_path")),
+                        ("vtt", result.get("vtt_path")),
+                    ):
+                        if artifact_path and Path(str(artifact_path)).name not in report:
+                            errors.append(f"report is missing {artifact_name} artifact link")
+                else:
+                    warnings.append(
+                        "report synthesis quality checks skipped because transcript has fewer than 100 non-whitespace characters"
+                    )
+            for link in re.finditer(r'\[[^\]]*\]\((?:<([^>]+)>|([^\s)]+))(?:\s+"[^"\n]*")?\)', report):
+                raw_link = link.group(1) or link.group(2)
+                parsed = urlsplit(raw_link)
+                if parsed.scheme or parsed.netloc or not parsed.path:
                     continue
-                linked_path = (report_path.parent / raw_link).resolve()
+                linked_path = (report_path.parent / unquote(parsed.path)).resolve()
                 if not linked_path.exists():
                     errors.append(f"report link is broken: {raw_link}")
+
+    # Only opted-in results require the disk-backed evidence chain at final verification.
+    if require_report and mode == "transcribe" and result.get("summary_workflow_version") is not None:
+        if result["summary_workflow_version"] != 1:
+            errors.append("unsupported summary_workflow_version")
+        else:
+            from summary_workflow import validate_workflow
+
+            workflow_verification = validate_workflow(result)
+            checks.append({"name": "summary_workflow", "ok": workflow_verification["ok"]})
+            errors.extend(workflow_verification.get("errors") or [])
 
     return {
         "ok": not errors,
@@ -4662,6 +4921,13 @@ def run_verify(output_dir: Path, target: str, *, require_report: bool) -> int:
         return 1
     try:
         result = read_json_object(result_path)
+        # An absolute result may belong to a different library than the CLI default.
+        if job_path and job_path.parent.parent.name == ".jobs":
+            output_dir = job_path.parent.parent.parent
+        elif result.get("episode_dir"):
+            package = Path(result["episode_dir"]).expanduser().resolve()
+            if package.parent.name == "资料":
+                output_dir = package.parent.parent
         verification = verify_result_artifacts(result, require_report=require_report)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(json.dumps({"ok": False, "errors": [str(exc)]}, ensure_ascii=False, indent=2))
@@ -4673,9 +4939,13 @@ def run_verify(output_dir: Path, target: str, *, require_report: bool) -> int:
         json.dumps(verification, ensure_ascii=False, indent=2) + "\n",
     )
     verification["verification_path"] = str(verification_path)
-    if verification["ok"] and verification["report_present"] and job_path and job_path.is_file():
+    if require_report and verification["ok"] and verification["report_present"] and job_path and job_path.is_file():
         tracker = JobTracker(job_path.parent, read_json_object(job_path), resumed=True)
         tracker.mark_report_complete()
+    elif require_report and not verification["ok"] and job_path and job_path.is_file():
+        tracker = JobTracker(job_path.parent, read_json_object(job_path), resumed=True)
+        if tracker.state.get("status") == "completed":
+            tracker.mark_report_pending("; ".join(verification["errors"]))
     if verification["ok"]:
         verification["knowledge_index"] = rebuild_knowledge_index(output_dir)
         verification["index_path"] = str(rebuild_human_index(output_dir))
@@ -5056,7 +5326,7 @@ def main() -> None:
         warn(f"ASR_ENGINE 值 '{asr_engine}' 无效，将使用默认值 'sensevoice'")
         asr_engine = "sensevoice"
     model = getattr(args, "model", None) or os.environ.get("WHISPER_MODEL", DEFAULT_MODEL)
-    keep_audio = bool(getattr(args, "keep_audio", False)) or os.environ.get("KEEP_AUDIO", "0") == "1"
+    keep_audio = keep_audio_enabled(args)
     force_transcribe = (
         bool(getattr(args, "force_transcribe", False))
         or os.environ.get("FORCE_TRANSCRIBE", "0") == "1"
@@ -5408,6 +5678,7 @@ def main() -> None:
 
         result_payload = {
             "mode": "transcribe",
+            "summary_workflow_version": 1,
             "reused_transcript": used_cached_transcript,
             "transcription_source": transcription.get("source") or "asr",
             "transcript_path": str(transcript_path),
@@ -5448,7 +5719,7 @@ def main() -> None:
         log(f"   Agent任务指令: {instruction_path}")
         log(f"   转录引擎: {transcription['model']}")
         log(f"   转录字符: {len(transcript)}")
-        print("\n" + instruction)
+        log(f"总结调度指令已写入: {instruction_path}")
     finally:
         if audio_created_this_run:
             if not keep_audio:

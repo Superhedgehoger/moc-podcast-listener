@@ -127,10 +127,12 @@ def prepare(result_path, target_tokens=8000, synthesis_tokens=24000, model=None)
     base = workflow_dir(result)
     settings = {"target_tokens": target_tokens, "synthesis_tokens": synthesis_tokens, "model": model,
                 "chunk_format": "segment_json_ordinal_ids_v2", "worker_contract": "source_selection_v2",
-                "max_primary_segments": 32, "writer_format": "evidence_detail_pieces_v3",
+                "max_primary_segments": 96, "writer_format": "evidence_detail_pieces_v3",
                 "evidence_budget_format": "content6000_serialized8000_v3"}
     settings["reference_format"] = "opaque_records_v1"
-    settings["quality_contract"] = "bounded_sentence_grounding_v3"
+    settings["quality_contract"] = "linear_source_grounding_v4"
+    from scripts.linear_review import prompt_fingerprint
+    settings["review_prompt_hash"] = prompt_fingerprint()
     generation_id = digest([fingerprint, settings, PIPELINE_VERSION])[:20]
     generation = base / generation_id
     old = None
@@ -196,22 +198,37 @@ def unseen_proper_names(text, source_text):
     candidates = re.findall(r"[\u4e00-\u9fff]{1,8}[·•][\u4e00-\u9fff]{1,12}|\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b", text)
     fold = lambda value: re.sub(r"[\s·•]", "", value).casefold()
     source_value = fold(source_text)
-    return sorted({name for name in candidates if fold(name) not in source_value})
+
+    def present(name):
+        if fold(name) in source_value:
+            return True
+        if not re.search(r"[·•]", name):
+            return False
+        left, right = re.split(r"[·•]", name, maxsplit=1)
+        # Chinese prose has no word boundary. A greedy candidate can include verbs
+        # around a source-present name; match its contiguous source name span.
+        return any(fold(left[-before:] + right[:after]) in source_value
+                   for before in range(2, len(left) + 1)
+                   for after in range(2, len(right) + 1))
+
+    return sorted({name for name in candidates if not present(name)})
 
 
 def quote_matches(quote, start, end, segments):
-    """Match verbatim text near its claimed time, including repeated occurrences."""
+    """Match verbatim text at its original parent start, allowing second rounding."""
     if not normalized(quote) or not math.isfinite(start) or not math.isfinite(end) or start < 0 or end < start:
         return False
     for index, segment in enumerate(segments):
-        if not float(segment["start"]) - 8 <= start <= float(segment["end"]) + 8:
+        if abs(start - float(segment["start"])) > 0.500001:
             continue
         text = ""
         for other in segments[index:index + 4]:
             text += other["text"]
             offset = normalized(text).find(normalized(quote))
-            if 0 <= offset < len(normalized(segment["text"])) and end <= float(other["end"]) + 8:
-                return True
+            if 0 <= offset < len(normalized(segment["text"])):
+                # The first complete match identifies its actual ending parent.
+                # Appending unrelated later segments cannot legitimize a longer range.
+                return end <= float(other["end"]) + 0.500001
     return False
 
 

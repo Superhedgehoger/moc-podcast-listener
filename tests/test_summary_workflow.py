@@ -85,9 +85,36 @@ class WorkflowFixture(unittest.TestCase):
 
 
 class SummaryWorkflowTests(WorkflowFixture):
+    def test_review_prompt_change_preserves_blocked_ledger_and_completed_extraction(self):
+        from scripts import linear_review
+        workflow.prepare(self.result_path)
+        self.complete_extracts()
+        for _ in range(3):
+            workflow.task_event(self.result_path, "write", "start")
+            workflow.task_event(self.result_path, "write", "fail", "Invalid review findings")
+        old = self.state()
+        workflow.prepare(self.result_path)
+        self.assertEqual(self.state()["tasks"]["write"]["status"], "blocked")
+        self.assertEqual(self.state()["generation"], old["generation"])
+        with patch.object(linear_review, "COMMON", linear_review.COMMON + "Changed review instruction."):
+            workflow.prepare(self.result_path)
+        new = self.state()
+        self.assertNotEqual(new["generation"], old["generation"])
+        self.assertEqual(new["tasks"]["extract-0000"]["status"], "complete")
+        self.assertEqual(new["tasks"]["write"]["status"], "pending")
+        snapshot = read(workflow.workflow_dir(self.result) / old["generation"] / "state-snapshot.json")
+        self.assertEqual(snapshot["tasks"]["write"]["attempts"], 3)
+        self.assertEqual(snapshot["tasks"]["write"]["status"], "blocked")
+
     def test_source_absent_composite_name_is_flagged_not_silently_accepted(self):
         self.assertIn("Zaha Hadid", workflow.unseen_proper_names("Zaha Hadid wrote the thesis", "库哈斯的论文"))
         self.assertEqual(workflow.unseen_proper_names("Conversation Piece", "conversation piece"), [])
+
+    def test_chinese_composite_name_does_not_consume_surrounding_prose(self):
+        self.assertEqual(workflow.unseen_proper_names("菲利普·斯塔克则用它形容阿莱西外星人榨汁机。",
+                                                     "菲利普斯塔克为阿莱西设计的外星人榨汁机"), [])
+        self.assertEqual(workflow.unseen_proper_names("设计师马克·吐温谈及作品。", "马克吐温讨论作品"), [])
+        self.assertTrue(workflow.unseen_proper_names("扎哈·哈迪德写了论文。", "库哈斯写了论文"))
 
     def test_extract_cannot_join_nonadjacent_segments_into_a_direct_quote(self):
         self.set_source(["First phrase.", "Intervening qualification.", "Last phrase."])
@@ -198,6 +225,14 @@ class SummaryWorkflowTests(WorkflowFixture):
                 save(self.result["segments_path"], [dict(start=start, end=end, text="Source")])
                 with self.assertRaises(ValueError):
                     workflow.prepare(self.result_path)
+
+    def test_quote_must_start_at_its_parent_not_a_nearby_segment_or_sentence(self):
+        segments = [dict(start=1.8, end=5.2, text="First statement."),
+                    dict(start=5.5, end=12.0, text="Second statement.")]
+        self.assertTrue(workflow.quote_matches("First statement.", 2, 2, segments))
+        self.assertFalse(workflow.quote_matches("First statement.", 6, 6, segments))
+        self.assertFalse(workflow.quote_matches("Second statement.", 2, 2, segments))
+        self.assertFalse(workflow.quote_matches("First statement.", 1.8, 12.0, segments))
 
     def test_prepare_is_idempotent_and_preserves_running_state_and_artifacts(self):
         first = workflow.prepare(self.result_path)

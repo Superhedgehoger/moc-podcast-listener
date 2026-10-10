@@ -1,5 +1,21 @@
 # v4.17.0 验证记录 / Validation Record
 
+## 2026-10-10 修复与续测（当前状态，优先于历史记录）
+
+**234 项离线测试通过；真实整集最终验收仍进行中，不把局部分块通过当作发布通过。** 正式资料库和 OpenClaw 安装目录未修改，未合并 main。
+
+- 原文审稿改为“原文覆盖批次 + 稿件依据分片”，不再遍历全部交叉组合。两个方向均先保留每条断言最匹配的完整候选，再按证据和完整提示预算分组。完整原句、正文与知识条目均有无遗漏/重复检查；这只是处理完整性，不是事实准确率。
+- 独立复查发现并修复：说话人标签丢失、稿件分片所需原文超过预算、添加 ID 后将可分句段落误判为不可分；另补覆盖方向的证据预留回归。匿名说话人不会被推断为真实姓名。
+- 审稿问题改为选择提供的 `source_id`，程序恢复对应逐字原文；拒绝未知地址、稿件地址冒充原文地址及模型自行填入替代引文。不改变模型给出的通过/失败结论，也不把这项修复称为语义判断正确。
+- 真实审稿曾声称稿件包含实际不存在的女性代词和英文标题。新增错误断言的稿件编号、逐字片段及生产章节绑定，拒绝批评不存在的文字；正文遗漏按全部提供段落合并判断。修复中文姓名正则吞入相邻说明文字的误判，语义审稿要求继续保留。
+- 审稿提示和规划版本有指纹。真实变更生成新代际、保留旧状态与完整失败次数；同一输入仍不能清空三次上限。合格写作缓存仍需提示、模型、配置和输出哈希一致。
+- 提取保留估算 8K 上限，将完整片段数量上限从 32 改为 96；《纵横四海 EP86》仍保留全部 6303 个片段，规划为 84 块。此为结构性降调用数，不代表 84 块已通过真实模型验证。
+- 修复引述时间边界：起点只允许原段起点的秒级四舍五入，不再放宽到附近 8 秒；不允许追加无关后续片段来使过长的结束时间通过。
+- 《灵动岛》早期本轮审稿先因自相矛盾的问题清单、错误原文引文定位而被拒绝；后一次调用因执行沙箱无法解析服务地址失败。确认获准联网的环境可解析后继续，旧失败次数保留。没有修改全局模型配置或猜补不完整 JSON。
+- 用户已提供课程样本位置 `/Users/djy/Documents/播客总结`。只读检索未确认正式课程，已询问具体课程文件名；历史“目录未提供”不再适用。学习型播客不冒充正式课程。256K 同模型环境仍未验证。
+
+English: 234 offline tests pass. Source-aware linear audit planning, speaker preservation, ID-overhead splitting, exact source-address resolution, literal artifact binding for review findings and prompt-fingerprinted recovery are implemented. Real full-episode acceptance remains pending. The supplied course directory was inspected, but no formal course was identified. The existing installation and GitHub main are unchanged; 256K is not tested.
+
 ## 2026-10-08 修复续测（优先于下方历史记录）
 
 **代码回归 215 项通过；真实整集验收仍未通过，不合并 main 或覆盖 OpenClaw。** 本轮没有修改正式播客资料库、清空 blocked 次数、切换模型或伪造审核成功。

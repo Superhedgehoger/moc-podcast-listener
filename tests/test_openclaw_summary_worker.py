@@ -328,7 +328,7 @@ class WorkerAdapterTests(unittest.TestCase):
             task = {"kind": "extract", "input": str(path / "input.json"),
                     "instruction": str(path / "task.md"), "output": str(path / "output.json"), "input_hash": "hash"}
             prompt = worker.build_prompt(task)
-            self.assertIn('"0:0": "source"', prompt)
+            self.assertEqual(json.loads(prompt.split("\nINPUT DATA:\n")[1])["primary"][0]["excerpts"]["0:0"], "source")
             self.assertNotIn("private-source-path", prompt)
             self.assertIn("Do not call tools", prompt)
 

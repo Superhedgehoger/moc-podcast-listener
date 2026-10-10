@@ -38,6 +38,17 @@ class SegmentChunkingTests(unittest.TestCase):
         self.assertEqual(result["chunks"][0]["estimated_tokens"], 6)
         self.assertEqual(result["estimator"], "utf8_bytes_upper_bound")
 
+    def test_dense_short_segments_use_byte_budget_without_losing_units(self):
+        source = segments(*[f"Example {i} requires consent." for i in range(400)])
+        previous = MODULE.budget_chunks(source, 7600, include_metadata=True, max_segments=32)
+        current = MODULE.budget_chunks(source, 7600, include_metadata=True, max_segments=96)
+        self.assertLess(len(current["chunks"]), len(previous["chunks"]))
+        self.assertEqual([s["text"] for c in current["chunks"] for s in c["segments"]],
+                         [s["text"] for s in source])
+        for chunk in current["chunks"]:
+            self.assertLessEqual(chunk["estimated_tokens"], 7600)
+            self.assertLessEqual(len(chunk["segments"]), 96)
+
     def test_context_is_complete_previous_segment_and_within_budget(self):
         result = MODULE.budget_chunks(segments("aaaa", "bb", "ccccc", "ddddd"), 8)
         chunks = result["chunks"]

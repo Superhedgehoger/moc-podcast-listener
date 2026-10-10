@@ -86,8 +86,11 @@ experimental: passing individual chunks does not verify whole-episode quality.
 Live testing also found semantic errors despite mechanical verification. Opted-in
 new writer inputs require a current independent audit. Short reference nodes
 keep transitive original evidence IDs in a hash-checked local registry instead
-of repeating them in model context. Sentence audits cap both source bytes and
-verdict rows, retain original parent timestamps, and resume hash-bound progress.
+of repeating them in model context. Source coverage and artifact grounding are
+reviewed separately, so calls add source batches and artifact shards rather than
+crossing every pair. Each call remains bounded, keeps original parent timestamps,
+and resumes hash-bound progress. Missing retrieved support still fails; processing
+coverage is not a measure of factual accuracy.
 Long-source audits still need full live validation and cost measurements; see the
 [validation record](VALIDATION-v4.17.0.md).
 Artifact-only verification cannot complete a job:

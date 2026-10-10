@@ -224,11 +224,9 @@ def build_prompt(task):
             "id must be a nonempty STRING. quote_ref is an ADDRESS such as '0:0', NOT quotation text. "
             "Select quote_ref from its supplied excerpts; the host copies that excerpt verbatim. "
             "The quote_ref primary index MUST appear in segment_indices. Do not return quote text or source hashes. "
-            "Capture all major topics, mechanisms, cases, numbers, disagreement and qualifications. "
-            "Use concise wording, no repetitive evidence; aim below 3200 UTF-8 bytes for your response. "
+            "Capture major topics, mechanisms, cases, numbers and qualifications in under 3200 UTF-8 bytes. "
             "Every claim must be supported by the selected primary indices, not context-only segments.\n"
-            "Write concise Chinese claims and lists. Preserve exact names/numbers and uncertainty; "
-            "do not duplicate the same explanation across claim, topics and examples. "
+            "Use concise Chinese; preserve exact names/numbers and uncertainty, without duplicating explanations. "
             "segment_indices should be the minimal exact support for each claim, not every segment in a topic range. "
             "For advertising or repeated introductions preserve a brief claim and limitations, not a separate claim per sentence.\n"
         )
@@ -295,7 +293,8 @@ def build_prompt(task):
                        "No headings inside revised content. Repair all short_sections plus any reported errors, "
                        "and preserve every other section. Expand with supported details only, not filler. "
                        "Quote all supplied verified_quotations if needed to satisfy the quote-section minimum.\n")
-    prompt += "\nINPUT DATA:\n" + json.dumps(payload, ensure_ascii=False)
+    separators = (",", ":") if task["kind"] == "extract" else None
+    prompt += "\nINPUT DATA:\n" + json.dumps(payload, ensure_ascii=False, separators=separators)
     directory = Path(task["output"]).parent
     repair = directory / "repair.json"
     if repair.exists():

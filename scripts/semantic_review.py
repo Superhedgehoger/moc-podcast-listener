@@ -44,6 +44,8 @@ def source_units(segments):
     for index, segment in enumerate(segments):
         base = {"source_id": f"s{index:06d}", "parent_id": segment.get("id", f"s{index:06d}"),
                 **{key: segment[key] for key in ("start", "end", "text")}}
+        if "speaker" in segment:
+            base["speaker"] = segment["speaker"]
         sentences = _sentences(segment["text"])
         if not sentences:
             sentences = [segment["text"]]
@@ -242,6 +244,9 @@ def grounding_job(units, shard):
 
 def plan_review(payload, body, knowledge, parts, part_texts=None):
     """Plan a whole short audit or the complete source-batch/artifact-shard product."""
+    if payload.get("semantic_review_contract") == "linear_source_grounding_v4":
+        from scripts.linear_review import plan
+        return plan(payload, body, knowledge, parts, part_texts)
     segments = _segments(payload)
     try:
         prompt, _ = review_prompt(payload, body, knowledge, parts)
@@ -358,6 +363,43 @@ def _string_values(value):
     return []
 
 
+def _validate_artifact_finding(finding, job):
+    if "artifact_addresses" not in job:
+        return
+    issue = finding.get("issue_type")
+    if issue == "missing_content":
+        if job.get("kind") != "coverage" or finding.get("artifact_id") != "" or finding.get("artifact_quote") != "":
+            raise ValueError("Semantic omission finding is only valid for source coverage with empty artifact references")
+        return
+    if issue != "incorrect_claim":
+        raise ValueError("Semantic finding requires an explicit claim or omission issue type")
+    address, quote = finding.get("artifact_id"), finding.get("artifact_quote")
+    atom = job["artifact_addresses"].get(address) if isinstance(address, str) else None
+    if atom is None or finding.get("part") not in atom["part_names"]:
+        raise ValueError("Semantic finding lacks a supplied artifact and correct producer part")
+    texts = [atom["text"]] if atom["kind"] == "body" else _string_values(atom["value"])
+    if not isinstance(quote, str) or not quote.strip() or not any(quote in text for text in texts):
+        raise ValueError("Semantic finding criticizes text absent from its supplied artifact")
+
+
+def _resolve_source_addresses(response, job):
+    """Resolve only explicitly selected supplied sources; never infer a verdict."""
+    if "source_addresses" not in job:
+        return response
+    if not isinstance(response, dict) or not isinstance(response.get("findings"), list):
+        raise ValueError("Semantic reviewer returned an incomplete verdict")
+    findings = []
+    for finding in response["findings"]:
+        if not isinstance(finding, dict) or "source_quote" in finding:
+            raise ValueError("Semantic reviewer must select a source address, not supply replacement quotation text")
+        address = finding.get("source_id")
+        if not isinstance(address, str) or address not in job["source_addresses"]:
+            raise ValueError("Semantic reviewer selected an unknown original source address")
+        _validate_artifact_finding(finding, job)
+        findings.append({**finding, "source_quote": job["source_addresses"][address]["text"]})
+    return {**response, "findings": findings}
+
+
 def _validate_verdict(response, job, segments):
     if not isinstance(response, dict):
         raise ValueError("Semantic reviewer returned an incomplete verdict")
@@ -373,12 +415,20 @@ def _validate_verdict(response, job, segments):
                 or not isinstance(finding.get("source_quote"), str) or not finding["source_quote"].strip()):
             raise ValueError("Semantic rejection lacks a source-supported impacted-part finding")
         quote = finding["source_quote"]
+        _validate_artifact_finding(finding, job)
+        if "source_addresses" in job:
+            address = finding.get("source_id")
+            unit = job["source_addresses"].get(address) if isinstance(address, str) else None
+            if unit is None or quote != unit["text"]:
+                raise ValueError("Semantic rejection lacks a source-supported original address binding")
         supported = any(quote in unit["text"] for unit in source) if scoped or "grounding_source" in job else (
             normalized(quote) in normalized("\n".join(s["text"] for s in source)))
         if not supported:
             raise ValueError("Semantic rejection lacks a source-supported impacted-part finding")
     if status == "passed" and findings:
         raise ValueError("Semantic pass contradicts rejection findings")
+    if job.get("kind") in {"coverage", "grounding"} and status == "failed" and not findings:
+        raise ValueError("Semantic rejection requires an actionable source-supported finding")
     if scoped:
         rows = response.get("units")
         expected = [u["source_id"] for u in job["batch"]["units"]]
@@ -426,6 +476,15 @@ def _aggregate(plan, verdicts, parts):
     findings = [finding for value in verdicts.values() for finding in value["findings"]]
     failures = [value["reason"] for value in verdicts.values() if value["status"] == "failed"]
     coverage = {}
+    if plan["mode"] == "linear":
+        expected_source = [unit["source_id"] for unit in plan["units"]]
+        checked_source = [key for job in plan["jobs"] for key in job.get("primary_source_ids", [])]
+        expected_artifacts = [atom["artifact_id"] for atom in plan["artifacts"]]
+        checked_artifacts = [key for job in plan["jobs"] for key in job.get("artifact_ids", [])]
+        if sorted(checked_source) != sorted(expected_source) or sorted(checked_artifacts) != sorted(expected_artifacts):
+            raise ValueError("Semantic audit incomplete: original source or artifact coverage lost or duplicated")
+        coverage = {key: {"review_job": job["job_id"], "status": verdicts[job["job_id"]]["status"]}
+                    for job in plan["jobs"] for key in job.get("primary_source_ids", [])}
     if plan["mode"] == "bounded":
         rows_by_source, body_rows_by_source = {}, {}
         body_job_ids = {job["job_id"] for job in plan["jobs"] if "batch" in job and job["shard"]["kind"] == "body"}
@@ -551,6 +610,7 @@ def run_review(task, payload, model, config, timeout, invoke, requests):
             else:
                 response, record = invoke(task, workspace, job["prompt"], model, config, timeout,
                                           directory / "reviews" / f"attempt-{task['attempts']}" / key)
+                response = _resolve_source_addresses(response, job)
             if not isinstance(record, dict):
                 raise ValueError("Semantic reviewer session metadata missing")
             audit["reviewer"].update({key: value for key, value in record.items() if key != "sessions"})
@@ -577,8 +637,8 @@ def run_review(task, payload, model, config, timeout, invoke, requests):
         if failures:
             _repair(directory, requests, findings)
             raise ValueError("Semantic review failed: " + "; ".join(failures))
-        audit.update(status="passed", reason="All planned source units and artifact shards independently audited; "
-                     "source-supported coverage or explicit approved minor omission for every source unit")
+        audit.update(status="passed", reason="All planned source coverage and artifact grounding jobs passed; "
+                     "the host processing-coverage ledger is complete, not a factual-accuracy score")
     except (ValueError, OSError, KeyError, TypeError) as exc:
         audit["status"] = "failed"
         audit["reason"] = str(exc)

@@ -310,10 +310,15 @@ def validate_task(task):
                         or not item["claim"].strip() or not item.get("details")):
                     raise ValueError(f"Invalid reduced topic/evidence at item {index}: a claim, details and at least one supplied evidence ID are required")
                 seen.update(refs)
-            for omitted in omissions:
-                if (not isinstance(omitted, dict) or omitted.get("evidence_id") not in required
-                        or not isinstance(omitted.get("reason"), str) or not omitted["reason"].strip()):
-                    raise ValueError("Invalid omission")
+            for index, omitted in enumerate(omissions):
+                if not isinstance(omitted, dict):
+                    raise ValueError(f"Invalid omission at index {index}: expected an object")
+                ref = omitted.get("evidence_id")
+                if not isinstance(ref, str) or ref not in required:
+                    label = repr(ref)[:120]
+                    raise ValueError(f"Invalid omission at index {index}: evidence_id {label} is not a supplied leaf ID; emit no omission records when nothing is omitted")
+                if not isinstance(omitted.get("reason"), str) or not omitted["reason"].strip():
+                    raise ValueError(f"Invalid omission at index {index}: {ref} requires a nonempty source-specific reason")
                 seen.add(omitted["evidence_id"])
             if seen != required:
                 missing = sorted(required - seen)

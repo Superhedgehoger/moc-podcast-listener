@@ -539,6 +539,30 @@ class SummaryWorkflowTests(WorkflowFixture):
         self.assertLessEqual(workflow.tokens(payload), 24000)
         self.assertEqual(set(payload["dependencies"]), {task["id"] for task in reducers})
 
+    def test_reduction_omission_errors_identify_record_and_preserve_rejection(self):
+        payload = {"leaf_ids": ["r0", "r1"], "output_budget": 6000}
+        task = {"kind": "reduce", "input": str(self.root / "reduction/input.json"),
+                "output": str(self.root / "reduction/output.json"), "input_hash": workflow.digest(payload)}
+        save(task["input"], payload)
+        output = {"input_hash": task["input_hash"],
+                  "items": [{"claim": "Both source claims", "details": "Preserved conditions",
+                             "evidence_ids": ["r0", "r1"]}], "omitted": []}
+        save(task["output"], output)
+        self.assertEqual(workflow.validate_task(task), output)
+        for record, diagnostic in (({"evidence_id": "", "reason": "Everything is covered"}, "evidence_id ''"),
+                                   ({"evidence_id": "r99", "reason": "Unknown source"}, "evidence_id 'r99'"),
+                                   ({"evidence_id": ["r0"], "reason": "Malformed ID"}, "not a supplied leaf ID"),
+                                   ({"evidence_id": "r0", "reason": ""}, "r0 requires"),
+                                   (None, "expected an object")):
+            with self.subTest(record=record):
+                invalid = {**output, "omitted": [record]}
+                save(task["output"], invalid)
+                with self.assertRaises(ValueError) as error:
+                    workflow.validate_task(task)
+                self.assertIn("Invalid omission at index 0", str(error.exception))
+                self.assertIn(diagnostic, str(error.exception))
+                self.assertEqual(read(task["output"]), invalid)
+
     def test_markdown_rebases_relative_links_images_and_reference_definitions(self):
         source = self.root / "episode" / "notes"
         report = self.root / "reports"

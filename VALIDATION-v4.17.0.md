@@ -1,6 +1,26 @@
 # v4.17.0 验证记录 / Validation Record
 
-## 2026-10-11 预算复查与继续验证
+## 2026-10-11 本轮结束检查点：未通过发布验收
+
+**288 项离线测试通过；本轮模型任务均已结束，私有调用配置已清理。没有最终合格报告，没有合并 main，没有更新 OpenClaw 正式安装。** 预算修复经独立代码复查；后续遗漏记录诊断补丁通过离线回归，但新提示尚未实测。
+
+| 样本 | 当前可复用成果 | 阻塞与未完成内容 |
+| --- | --- | --- |
+| 《灵动岛》 | 完整提取及正文、知识、覆盖草稿；5 条引述机械匹配 | 写作三次 blocked；审核输出非 JSON，另有有效否定意见；整稿未通过 |
+| 《平原上的摩西》 | 16 个提取块、13 个归纳任务、全部正文、两个 scoped 覆盖检查；11 条引述机械匹配 | 43 个原文审核任务中保存 36 个结论（15 passed、21 failed）；下一任务三次误用遗漏类型，写作三次 blocked；不是完整审核 |
+| 《纵横四海 EP86》 | 88/88 提取任务、6303/6303 原始片段，第一层归纳首组通过 | 第二组三次后 blocked，最后为第 13 行未闭合 JSON 字符串；其余 12 组、下游写作和验收尚未执行 |
+
+长样本失败提取块 `extract-0081` 显式拆成三个完整输入子任务，三者首次通过；旧三次记录及先前合格任务保留。当前代际为 `05ef4d07bf7a73060fc9`，两次提取拆分增加的任务数不冒充原始片段覆盖率。归纳失败记录没有清零或猜补完成标记。
+
+审稿的 passed/failed 是模型判断，不是人工确认的准确率。21 个否定尚未逐项确认，已观察到把其他原文批次的话题误判为遗漏的情况，不能将其当作 21 个真实事实错误。
+
+新增诊断修复：无遗漏时明确要求不输出遗漏记录；空、未知、非字符串证据编号及空原因均继续拒绝，错误指出记录位置和实际编号。原输出不被修改。当前三个样本均到达保留的重试上限，不能重复发起相同失败任务以获取通过结论。
+
+128K 私有配置用于真实 Agnes 调用，但低输入请求不证明窗口极限。256K 和正式课程未实测；已扫描用户提供的课程目录，未识别正式课程样本，不能将学习播客冒充课程。最终发布还需要整集质量验收，不能用离线通过、模型退出成功、已生成草稿或引述机械通过代替。
+
+English: 288 offline tests pass. All current live workers have stopped and private invocation configs were removed. The short writer remains blocked; the interview saved 36/43 reviews (15 positive, 21 negative) before another review exhausted its protocol budget. The long sample completed all 88 extraction tasks and 6303 original segments plus one reduction; the next reduction exhausted three calls with incomplete JSON. No accepted final report, main merge or stable installation update is claimed. New omission diagnostics are offline-tested only. Formal-course and 256K acceptance remain untested.
+
+## 2026-10-11 预算复查与继续验证（历史检查点）
 
 最新代码 **287 项离线测试通过**，Skill 格式、Python 编译及 Git 空白检查通过；独立只读代码复查没有剩余实质问题。新增修复：原文覆盖批次先预留相邻原句，再填充可选正文；完整 grounding 请求的 JSON 序列化开销也在稿件入队时检查，可分内容按完整句拆分，真正不可分内容仍拒绝。
 
@@ -10,7 +30,7 @@
 
 English: 287 offline tests pass, with independent read-only code review. Source context is reserved before optional body retrieval, and full serialized grounding requests are checked before admitting divisible artifacts. Local replanning covers all 1101 interview source units in 27 context-bearing batches, within 22999 bytes. This is not live acceptance of the new planner; the already-running review retains its previously loaded implementation. Exact-text/parent-time checks pass for 11 interview and five short-draft quotations. Live episode acceptance, formal-course and 256K tests remain incomplete; main and the installed Skill stay unchanged.
 
-## 2026-10-11 Agnes 专项修复与续测（当前状态）
+## 2026-10-11 Agnes 专项修复与续测（历史检查点）
 
 最新检查点：**284 项离线测试通过。** 访谈旧写作任务因将约 75K 字节正文重复放进 23K 上限的覆盖请求，三次后 blocked。新增完整段落检索式覆盖与一次性显式协议迁移；旧三次记录、全部合格证据/正文缓存、每部分次数及相同提示的否定审稿意见保留，不重启无关语义失败。两项新的 Agnes 覆盖请求已经实际通过，处理全部 40 个证据编号，输入为 22895 / 17447 UTF-8 字节，全文未删短。后续独立原文审稿正在运行，已有通过和否定意见，尚未整集验收。
 
@@ -51,7 +71,7 @@ English: 261 offline checks pass. Only the authorized Agnes model is used. Small
 
 English: 238 offline tests pass, but no current full-episode acceptance passed. The short writer blocked after three attempts; the interview passed all 16 extraction chunks and two reductions before a reduction blocked; the long episode passed 31/84 chunks before an inconsistent quote reference exhausted three attempts. All processes stopped and private invocation configs were removed. The draft branch is updated; main and the installed Skill are unchanged. Alternative-model authorization, a formal course sample and window verification remain pending.
 
-## 2026-10-10 修复与续测（当前状态，优先于历史记录）
+## 2026-10-10 修复与续测（历史检查点）
 
 **238 项离线测试通过；真实整集最终验收仍进行中，不把局部分块通过当作发布通过。** 正式资料库和 OpenClaw 安装目录未修改，未合并 main。
 

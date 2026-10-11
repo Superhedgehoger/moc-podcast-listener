@@ -318,6 +318,7 @@ def build_prompt(task):
                 "Group evidence by topic, retaining major mechanisms, cases, numbers, disagreements and qualifications. "
                 "Use concise Chinese and ONLY supplied leaf_ids for references. Every topic needs at least one evidence ID. "
                 "Account for every leaf_id in a topic or an explicit source-specific omission reason. "
+                "When nothing is omitted, emit NO omission records; never use an empty evidence_id to announce full coverage. "
                 "Do not add self-check notes or unsupported extra topics. Keep the assembled result within output_budget UTF-8 bytes. "
                 "Record formats:\n"
                 '{"record":"topic","claim":"Source-backed topic","evidence_ids":["SUPPLIED_ID"],"details":"Preserved cases and conditions"}\n'

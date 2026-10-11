@@ -244,7 +244,7 @@ def grounding_job(units, shard):
 
 def plan_review(payload, body, knowledge, parts, part_texts=None):
     """Plan a whole short audit or the complete source-batch/artifact-shard product."""
-    if payload.get("semantic_review_contract") == "linear_source_grounding_v4":
+    if payload.get("semantic_review_contract") in {"linear_source_grounding_v4", "linear_source_grounding_v5"}:
         from scripts.linear_review import plan
         return plan(payload, body, knowledge, parts, part_texts)
     segments = _segments(payload)
@@ -370,6 +370,10 @@ def _validate_artifact_finding(finding, job):
     if issue == "missing_content":
         if job.get("kind") != "coverage" or finding.get("artifact_id") != "" or finding.get("artifact_quote") != "":
             raise ValueError("Semantic omission finding is only valid for source coverage with empty artifact references")
+        if job.get("retrieval_contract") == "linear_source_grounding_v5":
+            unit = job.get("source_addresses", {}).get(finding.get("source_id"))
+            if not unit or unit["source_id"] not in job.get("primary_source_ids", []):
+                raise ValueError("Coverage omission must refer to a primary original unit, not context-only source")
         return
     if issue != "incorrect_claim":
         raise ValueError("Semantic finding requires an explicit claim or omission issue type")
@@ -388,6 +392,9 @@ def _resolve_source_addresses(response, job):
         return response
     if not isinstance(response, dict) or not isinstance(response.get("findings"), list):
         raise ValueError("Semantic reviewer returned an incomplete verdict")
+    if response.get("status") == "needs_source":
+        _validate_source_requests(response, job)
+        return response
     findings = []
     for finding in response["findings"]:
         if not isinstance(finding, dict) or "source_quote" in finding:
@@ -400,13 +407,73 @@ def _resolve_source_addresses(response, job):
     return {**response, "findings": findings}
 
 
+def _validate_source_requests(response, job):
+    if job.get("retrieval_contract") != "linear_source_grounding_v5" or job.get("kind") != "grounding":
+        raise ValueError("Source requests are only valid for recoverable grounding jobs")
+    requests = response.get("source_requests")
+    if response.get("findings") != [] or not isinstance(requests, list) or not requests:
+        raise ValueError("Source recovery requires requests and no factual rejection findings")
+    seen = set()
+    for request in requests:
+        if not isinstance(request, dict) or set(request) != {"part", "artifact_id", "artifact_quote", "reason"}:
+            raise ValueError("Source recovery requires exact part, artifact_id, artifact_quote and reason fields")
+        _validate_artifact_finding({**request, "issue_type": "incorrect_claim"}, job)
+        if not isinstance(request["reason"], str) or len(request["reason"].strip()) < 8:
+            raise ValueError("Source recovery requires a specific missing-context reason")
+        if not isinstance(request["artifact_quote"], str) or len(request["artifact_quote"].strip()) < 8:
+            raise ValueError("Source recovery requires a substantive literal artifact assertion")
+        key = (request["artifact_id"], request["artifact_quote"])
+        if key in seen:
+            raise ValueError("Source recovery requests are duplicated")
+        seen.add(key)
+    return requests
+
+
+def _replay_recovery(job, units, rounds, model, producers):
+    from scripts.review_retrieval import expand_job
+    if not isinstance(rounds, list) or len(rounds) > 2:
+        raise ValueError("Source recovery history exceeds two bounded lookups")
+    sessions = set()
+    for row in rounds:
+        response, reviewer = row["response"], row["reviewer"]
+        if (row.get("hash") != digest([response, reviewer, row.get("prompt_hash"), row.get("next_prompt_hash")])
+                or row.get("prompt_hash") != digest(job["prompt"]) or response.get("status") != "needs_source"):
+            raise ValueError("Source recovery history is corrupt or stale")
+        session = reviewer.get("sessionId")
+        if (not session or session in producers | sessions
+                or f"{reviewer.get('provider')}/{reviewer.get('model')}" != model):
+            raise ValueError("Source recovery requires distinct non-producer current-model sessions")
+        _validate_verdict(response, job, [])
+        job = expand_job(job, units, _validate_source_requests(response, job))
+        if digest(job["prompt"]) != row.get("next_prompt_hash"):
+            raise ValueError("Source recovery lookup scope changed")
+        sessions.add(session)
+    return job
+
+
 def _validate_verdict(response, job, segments):
     if not isinstance(response, dict):
         raise ValueError("Semantic reviewer returned an incomplete verdict")
     status, reason, findings = response.get("status"), response.get("reason"), response.get("findings")
-    if (status not in {"passed", "failed"} or not isinstance(reason, str) or len(reason.strip()) < 8
+    recoverable = job.get("retrieval_contract") == "linear_source_grounding_v5"
+    if recoverable:
+        required_fields = {"status", "reason", "findings", "source_requests", "approved_name_translations"}
+        missing, unknown = required_fields - set(response), set(response) - required_fields
+        if missing or unknown:
+            raise ValueError("Recoverable audit requires exactly its five verdict fields; missing="
+                             + ",".join(sorted(missing)) + "; unknown=" + ",".join(sorted(unknown)))
+    if (status not in ({"passed", "failed", "needs_source"} if recoverable else {"passed", "failed"})
+            or not isinstance(reason, str) or len(reason.strip()) < 8
             or not isinstance(findings, list) or response.get("approved_name_translations") != []):
         raise ValueError("Semantic reviewer returned an incomplete verdict")
+    if recoverable:
+        if not isinstance(response.get("source_requests"), list):
+            raise ValueError("Recoverable audit requires source_requests array")
+        if status == "needs_source":
+            _validate_source_requests(response, job)
+            return response
+        if response["source_requests"]:
+            raise ValueError("Source requests cannot coexist with a final verdict")
     scoped = "batch" in job
     source = job["batch"]["units"] + job["batch"]["context_units"] if scoped else job.get("grounding_source", segments)
     for finding in findings:
@@ -473,6 +540,8 @@ def _repair(directory, requests, findings):
 def _aggregate(plan, verdicts, parts):
     if set(verdicts) != {job["job_id"] for job in plan["jobs"]}:
         raise ValueError("Semantic audit incomplete: not every planned unit/shard pair was audited")
+    if any(value.get("status") == "needs_source" for value in verdicts.values()):
+        raise ValueError("Semantic audit awaiting original-source recovery; not a factual rejection")
     findings = [finding for value in verdicts.values() for finding in value["findings"]]
     failures = [value["reason"] for value in verdicts.values() if value["status"] == "failed"]
     coverage = {}
@@ -519,9 +588,14 @@ def _aggregate(plan, verdicts, parts):
 def run_review(task, payload, model, config, timeout, invoke, requests):
     directory = Path(task["output"]).parent
     audit_path = directory / "semantic-review.json"
+    previous_audit = read(audit_path) if audit_path.exists() else {}
     audit = {"status": "failed", "input_hash": task["input_hash"],
              "artifact_hash": output_hash(task), "reason": "Semantic audit incomplete",
              "approved_name_translations": [], "reviewer": {}}
+    if (previous_audit.get("input_hash") == audit["input_hash"]
+            and previous_audit.get("artifact_hash") == audit["artifact_hash"]
+            and previous_audit.get("storage_failure_key")):
+        audit["storage_failure_key"] = previous_audit["storage_failure_key"]
     try:
         if type(task.get("attempts")) is not int or not 1 <= task["attempts"] <= 3:
             raise ValueError("Semantic audit requires a coordinator start between one and three")
@@ -596,37 +670,103 @@ def run_review(task, payload, model, config, timeout, invoke, requests):
 
         for job in plan["jobs"]:
             unchanged()
+            recoverable = job.get("retrieval_contract") == "linear_source_grounding_v5"
+            rounds = []
             prompt_hash = digest(job["prompt"])
             key = digest([bindings, job["job_id"], prompt_hash])
             progress_path = progress_directory / (key + ".json")
+            receipt_path = directory / "review-receipts" / (key + ".json")
             saved_bindings = bindings
-            saved_path = progress_path
+            saved_path = progress_path if progress_path.exists() else receipt_path
             old_keys = []
+            old_bindings_by_key = {}
             for old_input in payload.get("migrated_from_input_hashes", []):
                 old_bindings = {**bindings, "input_hash": old_input}
                 old_key = digest([old_bindings, job["job_id"], prompt_hash])
                 old_keys.append(old_key)
+                old_bindings_by_key[old_key] = old_bindings
                 candidate = progress_directory / (old_key + ".json")
+                if not candidate.exists():
+                    candidate = directory / "review-receipts" / (old_key + ".json")
                 if not saved_path.exists() and candidate.exists():
                     saved_path, saved_bindings = candidate, old_bindings
             reused = saved_path.exists()
             if reused:
                 saved = read(saved_path)
+                rounds = saved.get("recovery_rounds", []) if recoverable else []
+                expected_verdict_hash = digest([saved.get("response"), saved.get("reviewer"), rounds]) if recoverable else (
+                    digest([saved.get("response"), saved.get("reviewer")]))
                 if (saved.get("bindings") != saved_bindings or saved.get("prompt_hash") != prompt_hash
                         or saved.get("job_id") != job["job_id"]
-                        or saved.get("verdict_hash") != digest([saved.get("response"), saved.get("reviewer")])):
+                        or saved.get("verdict_hash") != expected_verdict_hash):
                     raise ValueError("Semantic audit validated progress is corrupt or stale")
+                if recoverable:
+                    job = _replay_recovery(job, plan["units"], rounds, model, producers)
                 response, record = saved["response"], saved["reviewer"]
             else:
+                if previous_audit.get("storage_failure_key") == key:
+                    raise OSError("Prior validated review is missing from storage; restore its receipt, never request a different verdict")
                 rejected_sessions = set()
+                recovery_path = directory / "review-recovery" / (key + ".json")
+                recovery = {"bindings": bindings, "prompt_hash": prompt_hash, "rounds": []}
+                recovery_from, recovery_bindings = recovery_path, bindings
+                if recoverable and not recovery_from.exists():
+                    for old_key in reversed(old_keys):
+                        candidate = directory / "review-recovery" / (old_key + ".json")
+                        if candidate.exists():
+                            recovery_from, recovery_bindings = candidate, old_bindings_by_key[old_key]
+                            break
+                if recoverable and recovery_from.exists():
+                    recovery = read(recovery_from)
+                    checkpoint = {k: v for k, v in recovery.items() if k != "checkpoint_hash"}
+                    if (recovery.get("bindings") != recovery_bindings or recovery.get("prompt_hash") != prompt_hash
+                            or recovery.get("history_hash") != digest(recovery.get("rounds"))
+                            or recovery.get("checkpoint_hash") != digest(checkpoint)):
+                        raise ValueError("Source recovery checkpoint is corrupt or stale")
+                    rounds = recovery["rounds"]
+                    job = _replay_recovery(job, plan["units"], rounds, model, producers)
+                    rejected_sessions.update(row["reviewer"]["sessionId"] for row in rounds)
+                    if rounds or recovery.get("pending_request"):
+                        audit["status"] = "needs_source"
+                    if recovery_from != recovery_path:
+                        recovery.update(bindings=bindings, migrated_from=str(recovery_from))
+                        recovery["checkpoint_hash"] = digest({k: v for k, v in recovery.items() if k != "checkpoint_hash"})
+                        write(recovery_path, recovery)
+                    if recovery.get("blocked_error"):
+                        audit["status"] = "needs_source"
+                        raise OSError(recovery["blocked_error"])
+
+                def save_recovery():
+                    recovery["rounds"] = rounds
+                    recovery["history_hash"] = digest(rounds)
+                    recovery["checkpoint_hash"] = digest({k: v for k, v in recovery.items() if k != "checkpoint_hash"})
+                    write(recovery_path, recovery)
+
+                def persist_verdict(value, metadata):
+                    saved = {"bindings": bindings, "prompt_hash": prompt_hash,
+                             "job_id": job["job_id"], "response": value, "reviewer": metadata,
+                             "migrated_from": None,
+                             **({"recovery_rounds": rounds} if recoverable else {}),
+                             "verdict_hash": digest([value, metadata, rounds]) if recoverable else digest([value, metadata])}
+                    try:
+                        write(receipt_path, saved)
+                        write(progress_path, saved)
+                    except OSError as exc:
+                        audit["storage_failure_key"] = key
+                        raise OSError("Validated review result could not be persisted; no automatic re-evaluation is permitted") from exc
 
                 def protocol_call(number=None):
+                    nonlocal job
                     unchanged()
                     call_directory = directory / "reviews" / f"attempt-{task['attempts']}" / key
                     if number is not None:
                         call_directory /= f"protocol-call-{number}"
+                    call_prompt = job["prompt"]
+                    if recoverable and number is not None:
+                        from scripts.review_feedback import retry_prompt
+                        call_prompt = retry_prompt(call_prompt, directory / "review-retries", key, number)
                     try:
-                        value, metadata = invoke(task, workspace, job["prompt"], model, config, timeout, call_directory)
+                        value, metadata = invoke(task, workspace, call_prompt, model, config, timeout, call_directory)
                     except (ValueError, KeyError, TypeError, OSError):
                         if (call_directory / "worker-run.json").exists():
                             rejected_sessions.add(read(call_directory / "worker-run.json").get("sessionId"))
@@ -634,7 +774,8 @@ def run_review(task, payload, model, config, timeout, invoke, requests):
                     if (not isinstance(metadata, dict) or not metadata.get("sessionId")
                             or metadata["sessionId"] in producers | prior_reviewers | accepted_sessions | rejected_sessions
                             or f"{metadata.get('provider')}/{metadata.get('model')}" != model):
-                        raise OSError("Semantic reviewer requires a fresh non-producer session using the exact current model")
+                        error = OSError if payload.get("part_retry_contract") == "independent_parts_v1" else ValueError
+                        raise error("Semantic reviewer requires a fresh non-producer session using the exact current model")
                     try:
                         unchanged()
                         resolved = _resolve_source_addresses(value, job)
@@ -642,6 +783,34 @@ def run_review(task, payload, model, config, timeout, invoke, requests):
                     except (ValueError, KeyError, TypeError):
                         rejected_sessions.add(metadata["sessionId"])
                         raise
+                    if recoverable and resolved["status"] == "needs_source":
+                        rejected_sessions.add(metadata["sessionId"])
+                        audit["status"] = "needs_source"
+                        requests_to_lookup = _validate_source_requests(resolved, job)
+                        recovery["pending_request"] = {"response": resolved, "reviewer": metadata}
+                        if len(rounds) >= 2:
+                            recovery["blocked_error"] = "Source recovery exhausted two lookups; preserve drafts and resolve missing original context"
+                            save_recovery()
+                            raise OSError(recovery["blocked_error"])
+                        from scripts.review_retrieval import expand_job
+                        try:
+                            expanded = expand_job(job, plan["units"], requests_to_lookup)
+                            if not set(expanded["source_addresses"]) - set(job["source_addresses"]):
+                                raise ValueError("Source recovery cannot add relevant original context; refine the artifact scope")
+                        except ValueError as exc:
+                            recovery["blocked_error"] = str(exc)
+                            save_recovery()
+                            raise OSError(str(exc)) from exc
+                        row = {"response": resolved, "reviewer": metadata,
+                               "prompt_hash": digest(job["prompt"]), "next_prompt_hash": digest(expanded["prompt"])}
+                        row["hash"] = digest([resolved, metadata, row["prompt_hash"], row["next_prompt_hash"]])
+                        rounds.append(row)
+                        job = expanded
+                        save_recovery()
+                        raise ValueError("Source recovery requested; inspect the newly supplied originals, not a presumed factual error")
+                    # Commit the actual judgment before the retry ledger can mark
+                    # success; a crash must never turn a valid rejection into a new vote.
+                    persist_verdict(resolved, metadata)
                     return resolved, metadata
 
                 if payload.get("part_retry_contract") == "independent_parts_v1":
@@ -653,12 +822,16 @@ def run_review(task, payload, model, config, timeout, invoke, requests):
                     history = [{"attempt": i + 1, "status": "failed", "migrated_from": str(path),
                                 "error": "Prior review dispatch has no validated progress"}
                                for i, path in enumerate(legacy)]
+                    ledger_path = directory / "review-retries" / "dispatch-ledgers" / (key + ".json")
+                    previous = read(ledger_path).get("attempts", []) if ledger_path.exists() else inherited or history
+                    if any(row.get("status") in {"passed", "running"}
+                           or row.get("error", "").startswith("Validated review result could not be persisted")
+                           for row in previous):
+                        raise OSError("Prior review result is missing or unresolved; recover its recorded response, never request a different verdict")
                     response, record = bounded_part_attempts(directory / "review-retries", key,
                                                               protocol_call, previous_attempts=inherited or history)
                 else:
-                    response, record = invoke(task, workspace, job["prompt"], model, config, timeout,
-                                              directory / "reviews" / f"attempt-{task['attempts']}" / key)
-                    response = _resolve_source_addresses(response, job)
+                    response, record = protocol_call()
             if not isinstance(record, dict):
                 raise ValueError("Semantic reviewer session metadata missing")
             audit["reviewer"].update({key: value for key, value in record.items() if key != "sessions"})
@@ -670,11 +843,16 @@ def run_review(task, payload, model, config, timeout, invoke, requests):
                 raise ValueError("Semantic reviewer did not use exact current model")
             unchanged()
             _validate_verdict(response, job, segments)
+            if response["status"] == "needs_source":
+                audit["status"] = "needs_source"
+                raise ValueError("Semantic audit awaiting original-source recovery; final verdict required")
+            audit["status"] = "failed"
             if not progress_path.exists():
                 write(progress_path, {"bindings": bindings, "prompt_hash": prompt_hash,
                                       "job_id": job["job_id"], "response": response, "reviewer": record,
                                       "migrated_from": str(saved_path) if reused and saved_path != progress_path else None,
-                                      "verdict_hash": digest([response, record])})
+                                      **({"recovery_rounds": rounds} if recoverable else {}),
+                                      "verdict_hash": digest([response, record, rounds]) if recoverable else digest([response, record])})
             accepted_sessions.add(session)
             prior_reviewers.add(session)
             audit["reviewer"]["sessions"].append({"job_id": job["job_id"], "reused": reused, **record})
@@ -689,7 +867,8 @@ def run_review(task, payload, model, config, timeout, invoke, requests):
         audit.update(status="passed", reason="All planned source coverage and artifact grounding jobs passed; "
                      "the host processing-coverage ledger is complete, not a factual-accuracy score")
     except (ValueError, OSError, KeyError, TypeError) as exc:
-        audit["status"] = "failed"
+        if audit["status"] != "needs_source":
+            audit["status"] = "failed"
         audit["reason"] = str(exc)
         raise
     finally:

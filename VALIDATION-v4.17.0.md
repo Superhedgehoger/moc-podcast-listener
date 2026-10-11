@@ -1,5 +1,27 @@
 # v4.17.0 验证记录 / Validation Record
 
+## 2026-10-12 回查与恢复修复：局部实测仍未验收
+
+**325 项离线测试通过。** 新审核 `linear_source_grounding_v5` 按完整断言、数字和经过校验的叶证据定位原文，预留完整父片段上下文及 1K 错误反馈预算。原文不足时使用待补证状态，最多两轮真实新增原文的回查，并共享原三次协议调用上限。回查不改变稿件，不代替最终审核。
+
+独立只读复查发现并修复了三个边界问题：同输入/产物的存储失败标记须跨所有剩余父尝试保留；转义量大的可选邻句不能变成必需证据；JSON 字段顺序变化不能算新增原文。新增回归验证上述保护及旧异常类型兼容。完整原文/稿件不截断，有效否定回执不会重抽，缺少回执的历史投票会阻止重评。
+
+真实 Agnes 局部测试只使用用户已授权的访谈隔离稿，历史三集作业、转录和个人笔记未修改：
+
+| 局部案例 | 真实结果 | 结论 |
+| --- | --- | --- |
+| 平台与未来项目 | 两次合格的补证请求；第三次缺少必填字段，保留三次上限 | 没有最终审核结论，不重跑相同失败请求 |
+| 演员 | 一次补证请求，后两次缺少必填字段 | 没有最终审核结论 |
+| 配乐 | 首次批评的文字不在所供稿件；后两次请求补证 | 到达预算上限，仍待原文确认，不标成事实错误或通过 |
+
+三组共 9 次真实调用，5 次返回有效补证请求；这些不是通过票。已完成补证流程的局部行为验证，但没有合格的最终局部结论，也没有整集报告验收。配乐与演员使用最终检索规划；平台测试在边界复查前启动，不能拿它证明后续边界修复已实测。漏字段错误现在明确列出缺失项，不由脚本猜补模型结论；部分后加诊断只做离线回归。
+
+新的完整访谈规划有 67 个审核任务，最大提示 21999 UTF-8 字节。本轮只执行局部诊断，未运行全部 67 项，因此不把少量局部调用宣称为完整质量或成本验证。更小审核分片增加了调用数量，尚不声称比旧规划更省总 token/耗时。
+
+没有调用 Gemini/Groq，没有修改默认模型或扩大真实材料外发范围；仍未做正式课程与 256K 容量实测。代码可作为用户要求的本地试用更新；GitHub main 不应据此合并为验收通过的正式版。
+
+English: 325 offline checks pass. v5 recovery uses validated provenance, claim/number anchors and bounded original context. Two lookups share the three-call limit, and durable judgments survive storage failures without new voting. A read-only review found three edge bugs, now covered by regressions. Nine targeted Agnes calls yielded five valid source requests but no final accepted verdict; original jobs remain unchanged. The full 67-job audit, formal course and 256K capacity were not tested. This is trial code, not release acceptance or a cost-efficiency claim.
+
 ## 2026-10-11 本轮结束检查点：未通过发布验收
 
 **288 项离线测试通过；本轮模型任务均已结束，私有调用配置已清理。没有最终合格报告，没有合并 main，没有更新 OpenClaw 正式安装。** 预算修复经独立代码复查；后续遗漏记录诊断补丁通过离线回归，但新提示尚未实测。

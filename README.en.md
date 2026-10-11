@@ -89,7 +89,11 @@ keep transitive original evidence IDs in a hash-checked local registry instead
 of repeating them in model context. Source coverage and artifact grounding are
 reviewed separately, so calls add source batches and artifact shards rather than
 crossing every pair. Each call remains bounded, keeps original parent timestamps,
-and resumes hash-bound progress. Missing retrieved support still fails; processing
+and resumes hash-bound progress. New v5 reviews request bounded source recovery
+when supplied candidates are insufficient, rather than declaring a factual error.
+At most two lookups share the existing three-call budget; no counters reset.
+Protocol retries receive concrete untrusted diagnostics, and valid negative
+judgments are durably retained, including across storage failures. Processing
 coverage is not a measure of factual accuracy.
 Long-source audits still need full live validation and cost measurements; see the
 [validation record](VALIDATION-v4.17.0.md).

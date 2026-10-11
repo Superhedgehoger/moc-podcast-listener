@@ -132,7 +132,7 @@ def prepare(result_path, target_tokens=8000, synthesis_tokens=24000, model=None)
                 "reduce_worker_contract": "topic_jsonl_records_v1",
                 "evidence_budget_format": "content6000_serialized8000_v3"}
     settings["reference_format"] = "opaque_records_v1"
-    settings["quality_contract"] = "linear_source_grounding_v4"
+    settings["quality_contract"] = "linear_source_grounding_v5"
     from scripts.linear_review import prompt_fingerprint
     settings["review_prompt_hash"] = prompt_fingerprint()
     old = read(base / "state.json") if (base / "state.json").exists() else None

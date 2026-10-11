@@ -96,7 +96,9 @@ def _prompt(kind, data):
 
 def prompt_fingerprint():
     """Invalidate downstream work on a real prompt change, retaining old ledgers."""
-    return hashlib.sha256(_json([CONTRACT, PLANNER_VERSION, COMMON, TEMPLATE, COVERAGE, GROUNDING]).encode()).hexdigest()
+    from scripts import review_retrieval
+    return hashlib.sha256(_json([CONTRACT, PLANNER_VERSION, COMMON, TEMPLATE, COVERAGE, GROUNDING,
+                                review_retrieval.fingerprint()]).encode()).hexdigest()
 
 
 def _fits(prompt):
@@ -116,6 +118,14 @@ def plan(payload, body, knowledge, parts, part_texts=None):
 
     segments = legacy._segments(payload)
     units = legacy.source_units(segments)
+    from scripts import review_retrieval as recovery
+    recoverable = payload.get("semantic_review_contract") == recovery.CONTRACT
+    make_prompt = recovery.prompt if recoverable else _prompt
+    budget = recovery.PROMPT_BUDGET if recoverable else BUDGET
+    artifact_budget = recovery.ARTIFACT_BUDGET if recoverable else ARTIFACT_BUDGET
+    fits = lambda prompt: len(prompt.encode("utf-8")) <= budget
+    split_assertions = recovery.assertions if recoverable else legacy._sentences
+    hints = recovery.part_parents(payload, units) if recoverable else {}
     source_terms = [_terms(unit["text"]) for unit in units]
     body_parts = [name for name in parts if name != "knowledge"]
 
@@ -129,9 +139,11 @@ def plan(payload, body, knowledge, parts, part_texts=None):
 
     def queries(atom):
         texts = [atom["text"]] if atom["kind"] == "body" else _strings(atom["value"])
-        return [_terms(sentence) for text in texts for sentence in legacy._sentences(text)]
+        return [_terms(sentence) for text in texts for sentence in split_assertions(text)]
 
     def first_sources(atom):
+        if recoverable:
+            return recovery.required(atom, units, source_terms, hints)
         # Reserve one best candidate per complete assertion before optional context.
         # This is a retrieval requirement, never a semantic approval.
         matches = []
@@ -144,22 +156,25 @@ def plan(payload, body, knowledge, parts, part_texts=None):
     def artifact_prompt(items, indexes, shard_id):
         shard = {"shard_id": shard_id, "kind": items[0]["kind"], "items": items}
         names = list(dict.fromkeys(name for atom in items for name in atom["part_names"]))
-        return _prompt("grounding", {"retrieved_source": source_view(indexes),
-                                    "artifact_shard": shard, "allowed_parts": names})
+        return make_prompt("grounding", {"retrieved_source": source_view(indexes),
+                                    "artifact_shard": shard, "allowed_parts": names,
+                                    **({"source_scope": {"complete": len(indexes) == len(units)}} if recoverable else {})})
 
     atoms, required_sources = [], {}
 
     def admit(atom):
         atom = {**atom, "artifact_id": f"a{len(atoms)}"}
         needed = first_sources(atom)
-        if (_size(atom) > ARTIFACT_BUDGET or not source_fits(needed)
-                or not _fits(artifact_prompt([atom], needed, "artifact-0000"))):
-            sentences = legacy._sentences(atom["text"]) if atom["kind"] == "body" else []
-            if len(sentences) <= 1:
+        if (_size(atom) > artifact_budget or not source_fits(needed)
+                or not fits(artifact_prompt([atom], needed, "artifact-0000"))):
+            sentences = split_assertions(atom["text"]) if atom["kind"] == "body" else []
+            if len(sentences) <= 1 and (_size(atom) > ARTIFACT_BUDGET or not source_fits(needed)
+                                       or not fits(artifact_prompt([atom], needed, "artifact-0000"))):
                 raise ValueError("Semantic audit blocked: unfit indivisible artifact/source grounding pair; realign complete boundaries")
-            for sentence in sentences:
-                admit({**atom, "text": sentence})
-            return
+            if len(sentences) > 1:
+                for sentence in sentences:
+                    admit({**atom, "text": sentence})
+                return
         atoms.append(atom)
         required_sources[atom["artifact_id"]] = needed
 
@@ -181,7 +196,7 @@ def plan(payload, body, knowledge, parts, part_texts=None):
         return sorted({i for atom in items for i in required_sources[atom["artifact_id"]]})
 
     def coverage_prompt(primary, context, passages):
-        return _prompt("coverage", {"primary_source": source_view(primary),
+        return make_prompt("coverage", {"primary_source": source_view(primary),
                                    "context_source": source_view(context),
                                    "retrieved_body": passages, "allowed_parts": body_parts})
 
@@ -194,7 +209,7 @@ def plan(payload, body, knowledge, parts, part_texts=None):
         context = []
         for i in coverage_context(primary):
             candidate = sorted(context + [i])
-            if source_fits(primary + candidate) and _fits(coverage_prompt(primary, candidate, passages)):
+            if source_fits(primary + candidate) and fits(coverage_prompt(primary, candidate, passages)):
                 context = candidate
         return context
 
@@ -205,11 +220,11 @@ def plan(payload, body, knowledge, parts, part_texts=None):
         while start + len(primary) < len(units):
             candidate = primary + [start + len(primary)]
             passages = [body_atoms[i] for i in required_body(candidate)]
-            if not source_fits(candidate) or not _fits(coverage_prompt(candidate, [], passages)):
+            if not source_fits(candidate) or not fits(coverage_prompt(candidate, [], passages)):
                 break
             context = coverage_context(candidate)
             if primary and (not source_fits(candidate + context)
-                            or not _fits(coverage_prompt(candidate, context, passages))):
+                            or not fits(coverage_prompt(candidate, context, passages))):
                 break
             primary = candidate
         if not primary:
@@ -225,7 +240,7 @@ def plan(payload, body, knowledge, parts, part_texts=None):
             if i in selected:
                 continue
             candidate = sorted(selected + [i])
-            if _fits(coverage_prompt(primary, context, [body_atoms[j] for j in candidate])):
+            if fits(coverage_prompt(primary, context, [body_atoms[j] for j in candidate])):
                 selected = candidate
         if not selected:
             raise ValueError("Semantic audit blocked: no complete body passage fits source coverage")
@@ -242,9 +257,9 @@ def plan(payload, body, knowledge, parts, part_texts=None):
     for atom in atoms:
         candidate = current + [atom]
         needed = required(candidate)
-        if current and (atom["kind"] != current[0]["kind"] or _size(candidate) > ARTIFACT_BUDGET
+        if current and (atom["kind"] != current[0]["kind"] or _size(candidate) > artifact_budget
                         or not source_fits(needed)
-                        or not _fits(artifact_prompt(candidate, needed, f"artifact-{len(shards):04d}"))):
+                        or not fits(artifact_prompt(candidate, needed, f"artifact-{len(shards):04d}"))):
             shards.append(current)
             current = []
         current.append(atom)
@@ -261,16 +276,17 @@ def plan(payload, body, knowledge, parts, part_texts=None):
 
         ranked = _rank([query for atom in items for query in queries(atom)], source_terms)
         selected = required(items)
-        if not source_fits(selected) or not _fits(grounding_prompt(selected)):
+        if not source_fits(selected) or not fits(grounding_prompt(selected)):
             raise ValueError("Semantic audit blocked: unfit indivisible artifact/source grounding pair")
         # Include author and neighbouring whole sentences after the top match.
         first = ranked[0]
-        order = list(dict.fromkeys([first, 0, first - 1, first + 1] + ranked))
+        order = list(dict.fromkeys((recovery.context_order(selected, units) if recoverable else
+                                   [first, 0, first - 1, first + 1]) + ranked))
         for i in order:
             if not 0 <= i < len(units) or i in selected:
                 continue
             candidate = sorted(selected + [i])
-            if source_fits(candidate) and _fits(grounding_prompt(candidate)):
+            if source_fits(candidate) and fits(grounding_prompt(candidate)):
                 selected = candidate
         if not selected:
             raise ValueError("Semantic audit blocked: unfit indivisible artifact/source grounding pair")
@@ -279,9 +295,14 @@ def plan(payload, body, knowledge, parts, part_texts=None):
                      "grounding_source": [units[i] for i in selected],
                      "source_addresses": {f"s{i}": units[i] for i in selected},
                      "artifact_addresses": {atom["artifact_id"]: atom for atom in items},
-                     "artifact_ids": [atom["artifact_id"] for atom in items], "shard": shard})
-    if any(not _fits(job["prompt"]) for job in jobs):
+                     "artifact_ids": [atom["artifact_id"] for atom in items], "shard": shard,
+                     **({"required_source_indexes": required(items)} if recoverable else {})})
+    if recoverable:
+        for job in jobs:
+            job["retrieval_contract"] = recovery.CONTRACT
+    if any(not fits(job["prompt"]) for job in jobs):
         raise ValueError("Semantic audit blocked: planned prompt exceeds 23000 UTF-8 bytes")
-    return {"mode": "linear", "contract": CONTRACT, "segments": segments, "units": units,
+    return {"mode": "linear", "contract": recovery.CONTRACT if recoverable else CONTRACT,
+            "segments": segments, "units": units,
             "artifacts": atoms, "batches": [[units[i] for i in batch] for batch in batches],
             "shards": shard_records, "jobs": jobs}

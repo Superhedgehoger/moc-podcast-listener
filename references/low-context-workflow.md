@@ -74,6 +74,32 @@ Recent OpenClaw versions use per-model `models.providers.<provider>.models[].con
 
 ## Recovery / 恢复
 
+New summaries use `linear_source_grounding_v5`. Grounding retrieval reserves each
+complete claim, numeric/name anchors and validated leaf provenance before optional
+original-parent context. Original wording and times never change. A reviewer with
+insufficient supplied originals must return `needs_source` bound to an actual
+artifact ID and literal assertion, not a factual rejection. The host performs at
+most two bounded original-source lookups, then requests a fresh review. Those
+lookups share the existing three-call protocol budget; they do not reset attempts.
+If no new relevant context fits, retain drafts and an actionable pending-source
+checkpoint. Never treat lookup, a keyword match, or `needs_source` as a pass.
+
+Protocol retries receive the previous validation error as untrusted JSON data,
+within 1000 extra UTF-8 bytes and the unchanged 23K total cap. Only the diagnostic
+may shrink; original source/artifact content cannot. Valid negative judgments are
+persisted before dispatch success, reused unchanged, and repair only their named
+parts. A lost or unpersisted judgment blocks new voting until its receipt is
+restored. Recovery history, prompt hashes and cumulative attempts remain on disk.
+
+新审核区分“已核对且错误”和“当前缺少原文”：后者先补证，再独立复核，最多两轮
+回查且计入原三次协议预算。原始证据、正文和旧次数保留；无法增加上下文时停在
+待补证阶段，不把检索不足变成事实错误。覆盖检查仍核对原文与正文，遗漏只能引用
+本批主要原句，不能拿上下文句作为遗漏。旧 v4 任务不自动迁移或清零；新准备操作
+遇到不兼容的历史 refined 状态时应保留原检查点，而不是删除状态后重启。
+
+格式重试反馈具体错误；有效的否定结论不重抽。补证和局部审核通过均不等于整集
+验收通过，最终报告仍须全部审核、装配及 `--require-report` 核验。
+
 Source-coverage planning reserves complete adjacent original sentences before adding
 optional report passages. When necessary it makes smaller primary batches rather
 than filling the prompt with body text and losing attribution context. An

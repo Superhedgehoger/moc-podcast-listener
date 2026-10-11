@@ -272,11 +272,14 @@ def validate_section(name, text, payload, sources):
     return text
 
 
-def _coverage_request(payload, evidence, leaves, sections=None):
+def _coverage_request(payload, evidence, leaves, sections=None, scope=None):
     minimums = _minimums(payload)
     data = {"leaf_ids": leaves, "section_names": list(minimums), **evidence}
     if sections is not None:
         data["sections"] = sections
+    if scope is not None:
+        data["body_scope"] = scope
+        data["section_names"] = list(sections)
     result = _request("coverage", "coverage", (
         "Return {\"items\":[{\"evidence_id\":STRING,\"section\":STRING,\"reason\":STRING}]}. "
         "Account for EVERY leaf_id exactly once. Map each semantic claim to a real required section "
@@ -285,6 +288,11 @@ def _coverage_request(payload, evidence, leaves, sections=None):
         "otherwise provide a provisional allocation for subsequent checking against the draft. "
         "Use an empty section and explicit honest omission reason when absent. Never claim omitted "
         "evidence is covered. Preserve upstream omissions and all original leaf IDs."
+        + (" Only complete retrieved body excerpts are supplied, not the entire report. "
+           "Use only a heading present in sections. Do not invent text from other sections. "
+           "An empty section means not found in supplied excerpts, not proof of absence in the whole report. "
+           "Explain this retrieval limitation honestly; independent source coverage checks the entire report separately."
+           if scope is not None else "")
     ), data)
     result["leaf_ids"] = list(leaves)
     return result
@@ -315,6 +323,9 @@ def coverage_requests(payload, sources, sections):
     actual = _actual_sections(sections, payload, sources)
     evidence = _evidence(payload, FIELDS["详细总结"])
     leaves = _leaves(payload)
+    if payload.get("coverage_worker_contract") == "scoped_body_coverage_v2":
+        from scripts.scoped_coverage import coverage_requests as scoped_requests
+        return scoped_requests(payload, evidence, actual, _coverage_request)
 
     def request(batch):
         selected = set(batch)

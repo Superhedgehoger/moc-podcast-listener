@@ -18,6 +18,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from summary_workflow import read, write, validate_task, quote_matches, normalized, listener, digest
+from scripts.bounded_retries import bounded_part_attempts, inherited_part_attempts
 
 
 def replace_sections(body, updates, allowed):
@@ -529,31 +530,6 @@ def run_writer(task, model, config, timeout):
         return _run_writer(task, model, private, timeout)
 
 
-def bounded_part_attempts(directory, binding, execute):
-    """Retain the three-start limit of each independent part across parent retries."""
-    path = Path(directory) / "dispatch-ledgers" / f"{binding}.json"
-    ledger = read(path) if path.exists() else {"binding": binding, "attempts": []}
-    if ledger.get("binding") != binding or not isinstance(ledger.get("attempts"), list):
-        raise ValueError("Part retry ledger is corrupt")
-    for index in range(len(ledger["attempts"]), 3):
-        row = {"attempt": index + 1, "status": "running", "started_at": time.time()}
-        ledger["attempts"].append(row)
-        write(path, ledger)
-        try:
-            value = execute(index + 1)
-        except (ValueError, KeyError, TypeError, OSError) as exc:
-            row.update(status="failed", error=str(exc), finished_at=time.time())
-            write(path, ledger)
-            if isinstance(exc, OSError):
-                raise
-        else:
-            row.update(status="passed", output_hash=digest(value), finished_at=time.time())
-            write(path, ledger)
-            return value
-    reason = ledger["attempts"][-1].get("error", "Previous part output needs repair")
-    raise ValueError("Part retry limit exhausted: " + reason)
-
-
 def _run_writer(task, model, config, timeout):
     from scripts import bounded_writer
     payload = read(task["input"])
@@ -643,6 +619,8 @@ def _run_writer(task, model, config, timeout):
                     if row.get("section") not in payload["section_minimums"] and not (
                             row.get("section") == "" and isinstance(row.get("reason"), str) and row["reason"].strip()):
                         raise ValueError("Coverage part requires a real section or an honest omission reason")
+                    if row.get("section") and "section_scope" in request and row["section"] not in request["section_scope"]:
+                        raise ValueError("Coverage section is outside the supplied complete body excerpts")
         except (ValueError, KeyError, TypeError) as exc:
             metrics[-1]["validation_error"] = str(exc)
             write(rejection, {"error": str(exc)})
@@ -660,8 +638,11 @@ def _run_writer(task, model, config, timeout):
             return dispatch_once(request)
         key = digest([request["kind"], request["name"]])[:16]
         binding = digest([task["input_hash"], request.get("base_prompt_hash", digest(request["prompt"])), model, config_hash])
+        old_bindings = [digest([old, request.get("base_prompt_hash", digest(request["prompt"])), model, config_hash])
+                        for old in payload.get("migrated_from_input_hashes", [])]
+        history = inherited_part_attempts(directory / "parts" / key, binding, old_bindings)
         return bounded_part_attempts(directory / "parts" / key, binding,
-                                     lambda number: dispatch_once(request, call_number=number))
+                                     lambda number: dispatch_once(request, call_number=number), previous_attempts=history)
 
     try:
         knowledge = None

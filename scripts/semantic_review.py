@@ -599,18 +599,66 @@ def run_review(task, payload, model, config, timeout, invoke, requests):
             prompt_hash = digest(job["prompt"])
             key = digest([bindings, job["job_id"], prompt_hash])
             progress_path = progress_directory / (key + ".json")
-            reused = progress_path.exists()
+            saved_bindings = bindings
+            saved_path = progress_path
+            old_keys = []
+            for old_input in payload.get("migrated_from_input_hashes", []):
+                old_bindings = {**bindings, "input_hash": old_input}
+                old_key = digest([old_bindings, job["job_id"], prompt_hash])
+                old_keys.append(old_key)
+                candidate = progress_directory / (old_key + ".json")
+                if not saved_path.exists() and candidate.exists():
+                    saved_path, saved_bindings = candidate, old_bindings
+            reused = saved_path.exists()
             if reused:
-                saved = read(progress_path)
-                if (saved.get("bindings") != bindings or saved.get("prompt_hash") != prompt_hash
+                saved = read(saved_path)
+                if (saved.get("bindings") != saved_bindings or saved.get("prompt_hash") != prompt_hash
                         or saved.get("job_id") != job["job_id"]
                         or saved.get("verdict_hash") != digest([saved.get("response"), saved.get("reviewer")])):
                     raise ValueError("Semantic audit validated progress is corrupt or stale")
                 response, record = saved["response"], saved["reviewer"]
             else:
-                response, record = invoke(task, workspace, job["prompt"], model, config, timeout,
-                                          directory / "reviews" / f"attempt-{task['attempts']}" / key)
-                response = _resolve_source_addresses(response, job)
+                rejected_sessions = set()
+
+                def protocol_call(number=None):
+                    unchanged()
+                    call_directory = directory / "reviews" / f"attempt-{task['attempts']}" / key
+                    if number is not None:
+                        call_directory /= f"protocol-call-{number}"
+                    try:
+                        value, metadata = invoke(task, workspace, job["prompt"], model, config, timeout, call_directory)
+                    except (ValueError, KeyError, TypeError, OSError):
+                        if (call_directory / "worker-run.json").exists():
+                            rejected_sessions.add(read(call_directory / "worker-run.json").get("sessionId"))
+                        raise
+                    if (not isinstance(metadata, dict) or not metadata.get("sessionId")
+                            or metadata["sessionId"] in producers | prior_reviewers | accepted_sessions | rejected_sessions
+                            or f"{metadata.get('provider')}/{metadata.get('model')}" != model):
+                        raise OSError("Semantic reviewer requires a fresh non-producer session using the exact current model")
+                    try:
+                        unchanged()
+                        resolved = _resolve_source_addresses(value, job)
+                        _validate_verdict(resolved, job, segments)
+                    except (ValueError, KeyError, TypeError):
+                        rejected_sessions.add(metadata["sessionId"])
+                        raise
+                    return resolved, metadata
+
+                if payload.get("part_retry_contract") == "independent_parts_v1":
+                    from scripts.bounded_retries import bounded_part_attempts, inherited_part_attempts
+                    inherited = inherited_part_attempts(directory / "review-retries", key, old_keys)
+                    legacy = sorted([path for old_key in [key] + old_keys
+                                     for path in (directory / "reviews").glob(f"attempt-*/{old_key}/worker-run.json")],
+                                    key=lambda path: int(path.parent.parent.name.split("-")[-1]))
+                    history = [{"attempt": i + 1, "status": "failed", "migrated_from": str(path),
+                                "error": "Prior review dispatch has no validated progress"}
+                               for i, path in enumerate(legacy)]
+                    response, record = bounded_part_attempts(directory / "review-retries", key,
+                                                              protocol_call, previous_attempts=inherited or history)
+                else:
+                    response, record = invoke(task, workspace, job["prompt"], model, config, timeout,
+                                              directory / "reviews" / f"attempt-{task['attempts']}" / key)
+                    response = _resolve_source_addresses(response, job)
             if not isinstance(record, dict):
                 raise ValueError("Semantic reviewer session metadata missing")
             audit["reviewer"].update({key: value for key, value in record.items() if key != "sessions"})
@@ -622,9 +670,10 @@ def run_review(task, payload, model, config, timeout, invoke, requests):
                 raise ValueError("Semantic reviewer did not use exact current model")
             unchanged()
             _validate_verdict(response, job, segments)
-            if not reused:
+            if not progress_path.exists():
                 write(progress_path, {"bindings": bindings, "prompt_hash": prompt_hash,
                                       "job_id": job["job_id"], "response": response, "reviewer": record,
+                                      "migrated_from": str(saved_path) if reused and saved_path != progress_path else None,
                                       "verdict_hash": digest([response, record])})
             accepted_sessions.add(session)
             prior_reviewers.add(session)

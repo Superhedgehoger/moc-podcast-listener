@@ -128,7 +128,7 @@ def prepare(result_path, target_tokens=8000, synthesis_tokens=24000, model=None)
     base = workflow_dir(result)
     settings = {"target_tokens": target_tokens, "synthesis_tokens": synthesis_tokens, "model": model,
                 "chunk_format": "segment_json_ordinal_ids_v2", "worker_contract": "source_selection_v2",
-                "max_primary_segments": 96, "writer_format": "chinese_markdown_independent_parts_v6",
+                "max_primary_segments": 96, "writer_format": "scoped_body_coverage_v7",
                 "reduce_worker_contract": "topic_jsonl_records_v1",
                 "evidence_budget_format": "content6000_serialized8000_v3"}
     settings["reference_format"] = "opaque_records_v1"
@@ -536,6 +536,7 @@ def status(result_path):
                 "semantic_review_required": True,
                 "part_retry_contract": "independent_parts_v1",
                 "writer_prompt_version": "chinese_markdown_v6",
+                "coverage_worker_contract": "scoped_body_coverage_v2",
                 "semantic_review_contract": state["settings"]["quality_contract"],
                 "report_workflow": str(references / "report-workflow.md"),
                 "knowledge_workflow": str(references / "knowledge-workflow.md"),

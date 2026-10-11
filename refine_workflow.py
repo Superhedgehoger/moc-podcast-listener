@@ -17,6 +17,8 @@ from reference_registry import expand_reduction, expand_refs, load_registry, pac
 MAX_INPUT_BYTES = 12000
 MAX_REFERENCE_NODES = 12
 POLICY = "whole_inputs_contiguous_v2"
+WRITER_FORMAT = "scoped_body_coverage_v7"
+COVERAGE_WORKER_CONTRACT = "scoped_body_coverage_v2"
 
 
 def retain_refinement_plan(old, fingerprint, settings):
@@ -30,7 +32,7 @@ def retain_refinement_plan(old, fingerprint, settings):
             and old.get("source_hash") == fingerprint
             and old.get("settings", {}).get("refinement_plan")):
         original = {k: v for k, v in old["settings"].items() if k != "refinement_plan"}
-        if (settings.get("writer_format") == "chinese_markdown_independent_parts_v6"
+        if (settings.get("writer_format") in {"chinese_markdown_independent_parts_v6", WRITER_FORMAT}
                 and not any(task["kind"] == "write" for task in old.get("tasks", {}).values())):
             settings["writer_format"] = original.get("writer_format", settings["writer_format"])
         if original != {k: v for k, v in settings.items() if k != "refinement_plan"}:
@@ -225,14 +227,9 @@ def _reduce_groups(payload, state, generation, prefix):
     return groups, [[e["task_id"] for e in group] for group in groups]
 
 
-def _clone(state, generation, previous, payload):
-    fresh = workflow.add_task(state, generation, previous["id"], previous["kind"], payload)
-    current_paths = {k: fresh[k] for k in ("input", "output", "instruction", "workspace")}
-    fresh.update(copy.deepcopy(previous))
-    fresh.update(current_paths, migrated_from=previous["input"])
+def _copy_task_artifacts(previous, fresh):
     old_directory = Path(previous["input"]).parent
     directory = Path(fresh["input"]).parent
-    shutil.copy2(previous["input"], fresh["input"])
     excluded = {"input.json", "output.json", "task.json", "task.md"}
     for path in old_directory.iterdir():
         if path.name in excluded:
@@ -242,12 +239,37 @@ def _clone(state, generation, previous, payload):
             shutil.copytree(path, target)
         else:
             shutil.copy2(path, target)
+
+
+def _clone(state, generation, previous, payload):
+    fresh = workflow.add_task(state, generation, previous["id"], previous["kind"], payload)
+    current_paths = {k: fresh[k] for k in ("input", "output", "instruction", "workspace")}
+    fresh.update(copy.deepcopy(previous))
+    fresh.update(current_paths, migrated_from=previous["input"])
+    directory = Path(fresh["input"]).parent
+    shutil.copy2(previous["input"], fresh["input"])
+    _copy_task_artifacts(previous, fresh)
     if previous["status"] == "complete":
         shutil.copy2(previous["output"], fresh["output"])
         workflow.validate_task(fresh)
         if workflow.output_hash(fresh) != workflow.output_hash(previous):
             raise ValueError("Cloned output changed")
     workflow.write(directory / "task.json", fresh)
+
+
+def _writer_payload(payload, old_input_hash):
+    if payload.get("coverage_worker_contract") == COVERAGE_WORKER_CONTRACT:
+        raise ValueError("Writer already uses the new coverage protocol; retries cannot be reset")
+    previous_hashes = payload.get("migrated_from_input_hashes", [])
+    if (not isinstance(previous_hashes, list)
+            or any(not isinstance(value, str) or not value for value in previous_hashes)):
+        raise ValueError("Invalid writer input-hash migration history")
+    fresh = copy.deepcopy(payload)
+    fresh.update(coverage_worker_contract=COVERAGE_WORKER_CONTRACT,
+                 migrated_from_input_hashes=[old_input_hash] + previous_hashes)
+    if workflow.digest(fresh) == old_input_hash:
+        raise ValueError("Coverage refinement must change the writer input contract")
+    return fresh
 
 
 def _receipt(base, state, task_id):
@@ -273,18 +295,36 @@ def refine(result_path, task_id):
         if any(t["status"] == "running" for t in old["tasks"].values()):
             raise ValueError("Wait for all running tasks before refinement")
         if task_id in old.get("refinements", {}):
+            if task_id == "write":
+                current = old["tasks"].get("write")
+                if not current or current["kind"] != "write" or current.get("id") != "write":
+                    raise ValueError("Current canonical coverage writer missing")
+                _checked_input(current)
             return _receipt(base, old, task_id)
         task = old["tasks"].get(task_id)
-        if (not task or task["kind"] not in {"extract", "reduce"} or task["status"] != "blocked"
+        if (not task or task["kind"] not in {"extract", "reduce", "write"} or task["status"] != "blocked"
                 or type(task.get("attempts")) is not int or task["attempts"] != 3):
-            raise ValueError("Refinement requires a blocked extract/reduce task exhausted at 3 attempts")
+            raise ValueError("Refinement requires a blocked extract/reduce or coverage writer exhausted at 3 attempts")
+        writer = task["kind"] == "write"
+        if writer and (task_id != "write" or task.get("id") != "write"
+                       or not isinstance(task.get("error"), str)
+                       or not task["error"].startswith("Coverage blocked")):
+            raise ValueError("Writer refinement requires canonical write with a Coverage blocked error")
         active = next((i for i, level in enumerate(old["levels"])
                        if any(old["tasks"][key]["status"] != "complete" for key in level)), None)
         if active is None or task_id not in old["levels"][active]:
             raise ValueError("Refinement requires a task at the existing active level")
+        if writer and (old["levels"][active] != ["write"]
+                       or any(value["status"] != "complete" for key, value in old["tasks"].items()
+                              if key != "write")):
+            raise ValueError("Coverage writer refinement requires all other tasks complete")
         payloads = {key: _checked_input(value) for key, value in old["tasks"].items()}
         if any(task_id in payload.get("dependencies", {}) for payload in payloads.values()):
             raise ValueError("Cannot refine a parent with existing downstream tasks")
+        if writer and any(key not in old["tasks"]
+                          or old["tasks"][key].get("output_hash") != value
+                          for key, value in payloads[task_id].get("dependencies", {}).items()):
+            raise ValueError("Coverage writer dependency fingerprint changed")
         for value in old["tasks"].values():
             if value["status"] == "complete":
                 workflow.validate_task(value)
@@ -292,23 +332,28 @@ def refine(result_path, task_id):
                     raise ValueError("Completed output fingerprint changed")
         payload = payloads[task_id]
         prefix = f"{task_id}-refine-{workflow.digest([old['generation'], task_id, task['input_hash'], POLICY])[:12]}"
-        if task["kind"] == "extract":
+        if writer:
+            groups, partition = [_writer_payload(payload, task["input_hash"])], [["write"]]
+        elif task["kind"] == "extract":
             groups, partition = _extract_groups(payload, old["settings"])
         else:
             # Path length affects the byte budget; a generation ID is always 20 chars.
             groups, partition = _reduce_groups(payload, old, base / ("0" * 20), prefix)
-        children = [f"{prefix}-{i:04d}" for i in range(len(groups))]
-        if set(children).intersection(set(old["tasks"]) | set(old.get("superseded_tasks", {}))):
+        children = ["write"] if writer else [f"{prefix}-{i:04d}" for i in range(len(groups))]
+        if not writer and set(children).intersection(set(old["tasks"]) | set(old.get("superseded_tasks", {}))):
             raise ValueError("Refinement child ID collision")
         settings = copy.deepcopy(old["settings"])
-        # Refinement is confined to evidence levels, before a writer exists.
-        # New downstream writers use the current bounded Markdown transport.
-        if "writer_format" in settings and not any(value["kind"] == "write" for value in old["tasks"].values()):
-            settings["writer_format"] = "chinese_markdown_independent_parts_v6"
-        plan = {"policy": POLICY, "parent_generation": old["generation"], "task_id": task_id,
+        if writer or ("writer_format" in settings
+                      and not any(value["kind"] == "write" for value in old["tasks"].values())):
+            settings["writer_format"] = WRITER_FORMAT
+        plan = {"policy": "writer_coverage_protocol_v2" if writer else POLICY,
+                "parent_generation": old["generation"], "task_id": task_id,
                 "kind": task["kind"], "input_hash": task["input_hash"], "children": children,
-                "partition": partition, "max_input_bytes": MAX_INPUT_BYTES,
-                "max_reference_nodes": MAX_REFERENCE_NODES}
+                "partition": partition}
+        if writer:
+            plan["coverage_worker_contract"] = COVERAGE_WORKER_CONTRACT
+        else:
+            plan.update(max_input_bytes=MAX_INPUT_BYTES, max_reference_nodes=MAX_REFERENCE_NODES)
         settings.setdefault("refinement_plan", []).append(plan)
         generation_id = workflow.digest([old["source_hash"], settings, workflow.PIPELINE_VERSION])[:20]
         generation = base / generation_id
@@ -324,6 +369,9 @@ def refine(result_path, task_id):
                   "retry_ledger": str(archive / "retry-ledger.json")}
         state.setdefault("refinements", {})[task_id] = record
         try:
+            references = base / old["generation"] / "references"
+            if writer and references.is_dir():
+                shutil.copytree(references, generation / "references")
             for key, previous in old["tasks"].items():
                 if key != task_id:
                     _clone(state, generation, previous, payloads[key])
@@ -333,7 +381,13 @@ def refine(result_path, task_id):
                     workflow.write(child_payload["reference_registry"]["path"], registry)
                 else:
                     child_payload = group
-                workflow.add_task(state, generation, key, task["kind"], child_payload)
+                fresh = workflow.add_task(state, generation, key, task["kind"], child_payload)
+                if writer:
+                    # Cache and dispatch bindings stay byte-for-byte intact. The
+                    # worker migrates old per-part bindings before any dispatch.
+                    _copy_task_artifacts(task, fresh)
+                    fresh["migrated_from"] = task["input"]
+                    workflow.write(Path(fresh["input"]).with_name("task.json"), fresh)
             workflow.write(generation / "chunks.json", [
                 {"task_id": key, "input": state["tasks"][key]["input"],
                  "input_hash": state["tasks"][key]["input_hash"]} for key in state["levels"][0]])

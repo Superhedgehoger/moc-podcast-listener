@@ -126,6 +126,270 @@ class RefinementTests(unittest.TestCase):
         for path, content in self.protected.items():
             self.assertEqual(Path(path).read_bytes(), content)
 
+    def coverage_writer(self, history=None):
+        self.settings["writer_format"] = "chinese_markdown_independent_parts_v6"
+        generation_id = workflow.digest([self.initial["source_hash"], self.settings, workflow.PIPELINE_VERSION])[:20]
+        self.initial["generation"] = generation_id
+        self.generation = self.base / generation_id
+        workflow.write(self.generation / "result.json", self.result)
+        sources = [self.extract(f"extract-{i:04d}", self.segments[i * 2:i * 2 + 2],
+                                complete=True, attempts=i + 2) for i in range(2)]
+        reduction = self.reduce("reduce-01-0000", sources, complete=True)
+        self.initial["levels"].append([reduction["id"]])
+        references = self.generation / "references"
+        workflow.write(references / "report-workflow.md", "Synthetic report reference.\n")
+        workflow.write(references / "knowledge-workflow.md", "Synthetic knowledge reference.\n")
+        payload = {**workflow.registered_payload([self.canonical(reduction)], self.generation, "write"),
+                   "dependencies": {reduction["id"]: reduction["output_hash"]},
+                   "part_retry_contract": "independent_parts_v1",
+                   "section_minimums": {"Synthetic section": 10},
+                   "result": {key: self.result[key] for key in ("transcript_path", "segments_path")},
+                   "report_workflow": str(references / "report-workflow.md"),
+                   "knowledge_workflow": str(references / "knowledge-workflow.md"),
+                   "source_lookup": {"result": str(self.result_path), "usage": "Synthetic lookup"},
+                   "coverage_worker_contract": "all_body_coverage_v1"}
+        if history is not None:
+            payload["migrated_from_input_hashes"] = history
+        task = workflow.add_task(self.initial, self.generation, "write", "write", payload)
+        self.initial["levels"].append(["write"])
+        self.exhaust(task)
+        task["error"] = "Coverage blocked: all-body coverage planning failed 77727 > 23000"
+        workflow.write(Path(task["input"]).with_name("task.json"), task)
+        directory = Path(task["input"]).parent
+        config_hash = workflow.digest({"model": "synthetic-model", "tools": {"deny": ["*"]}})
+        for name in ("body-section", "knowledge", "short-review"):
+            part = directory / "parts" / name
+            prompt = "Synthetic unchanged " + name
+            value = "Synthetic cached " + name
+            workflow.write(part / "validated.json", {
+                "input_hash": workflow.digest([prompt, "synthetic-model", config_hash]),
+                "output_hash": workflow.digest(value), "value": value})
+            workflow.write(part / "attempt-ledger.json", {
+                "binding": workflow.digest([task["input_hash"], workflow.digest(prompt), "synthetic-model", config_hash]),
+                "writer_input_hash": task["input_hash"], "attempts": 3,
+                "status": "blocked" if name == "short-review" else "complete"})
+            workflow.write(part / "dispatch-ledgers" / "old.json", {"input_hash": task["input_hash"], "attempts": 3})
+            workflow.write(part / "attempt-3" / "part-call-3" / "worker-run.json", {"attempt": 3, "fixture": True})
+            workflow.write(part / "attempt-3" / "worker-response.json", {"text": value})
+        workflow.write(directory / "writer-run-attempt-3.json", {"parts": ["synthetic only"]})
+        workflow.write(directory / "dispatch-ledgers" / "writer.json", {"input_hash": task["input_hash"], "attempts": 3})
+        workflow.write(directory / "body.md", "Synthetic cached draft, not validated model output.\n")
+        self.commit()
+        return task
+
+    def test_coverage_writer_protocol_migration_copies_parts_without_resetting_ledgers(self):
+        parent = self.coverage_writer(history=["earlier-input-hash", "oldest-input-hash"])
+        old = self.state()
+        old_payload = workflow.read(parent["input"])
+        artifacts = {key: self.files(Path(task["input"]).parent) for key, task in old["tasks"].items()}
+        references = self.files(self.generation / "references")
+        real_validate = workflow.validate_task
+
+        def no_writer_validation(task):
+            self.assertNotEqual(task["kind"], "write", "Migration must not claim writer validation")
+            return real_validate(task)
+
+        with patch.object(workflow, "status", side_effect=AssertionError("No scheduling")), \
+                patch.object(workflow, "validate_task", side_effect=no_writer_validation):
+            receipt = refinement.refine(self.result_path, "write")
+        current = self.state()
+        task = current["tasks"]["write"]
+        payload = workflow.read(task["input"])
+        self.assertEqual(receipt["children"], ["write"])
+        self.assertEqual(current["levels"], old["levels"])
+        self.assertEqual(set(current["tasks"]), set(old["tasks"]))
+        self.assertEqual(task["id"], "write")
+        self.assertEqual(task["attempts"], 0)
+        self.assertEqual(task["status"], "pending")
+        self.assertNotIn("output_hash", task)
+        self.assertNotIn("finished_at", task)
+        self.assertNotIn("error", task)
+        self.assertFalse(Path(task["output"]).exists())
+        self.assertNotEqual(task["input_hash"], parent["input_hash"])
+        self.assertEqual(task["input_hash"], workflow.digest(payload))
+        self.assertEqual(payload["coverage_worker_contract"], "scoped_body_coverage_v2")
+        self.assertEqual(payload["migrated_from_input_hashes"], [parent["input_hash"], "earlier-input-hash", "oldest-input-hash"])
+        changed_fields = {"coverage_worker_contract", "migrated_from_input_hashes"}
+        self.assertEqual({k: v for k, v in payload.items() if k not in changed_fields},
+                         {k: v for k, v in old_payload.items() if k not in changed_fields})
+        self.assertEqual(current["settings"]["writer_format"], "scoped_body_coverage_v7")
+        self.assertEqual(current["superseded_tasks"]["write"], old["tasks"]["write"])
+        self.assert_archive(old, receipt, artifacts)
+        directory = Path(task["input"]).parent
+        copied = self.files(directory)
+        for name, data in artifacts["write"].items():
+            if name not in {"input.json", "output.json", "task.json", "task.md"}:
+                self.assertEqual(copied[name], data)
+        self.assertEqual(self.files(self.base / current["generation"] / "references"), references)
+        self.assertEqual(self.files(self.generation / "references"), references)
+        self.assertEqual(load_registry(payload), load_registry(old_payload))
+        for key in old["tasks"]:
+            if key != "write":
+                self.assert_clone(old, current, key)
+        self.assertIn(current["generation"], Path(task["instruction"]).read_text())
+        self.assertEqual(task["workspace"], str(self.base / current["generation"]))
+        disk = self.files(self.base)
+        self.assertEqual(refinement.refine(self.result_path, "write"), receipt)
+        self.assertEqual(self.files(self.base), disk)
+        resumed = refinement.retain_refinement_plan(current, current["source_hash"],
+                                                   {**old["settings"], "writer_format": "scoped_body_coverage_v7"})
+        self.assertEqual(resumed, current["settings"])
+        self.assertEqual(workflow.digest([current["source_hash"], resumed, workflow.PIPELINE_VERSION])[:20], current["generation"])
+        self.assert_protected()
+
+    def test_coverage_writer_without_prior_history_and_idempotence_after_review_failure(self):
+        parent = self.coverage_writer()
+        receipt = refinement.refine(self.result_path, "write")
+        current = self.state()
+        task = current["tasks"]["write"]
+        self.assertEqual(workflow.read(task["input"])["migrated_from_input_hashes"], [parent["input_hash"]])
+        task.update(attempts=3, status="blocked", error="Semantic review failed: synthetic short review")
+        workflow.persist(self.base, current)
+        disk = self.files(self.base)
+        self.assertEqual(refinement.refine(self.result_path, "write"), receipt)
+        self.assertEqual(self.state()["tasks"]["write"]["attempts"], 3)
+        self.assertEqual(self.files(self.base), disk)
+
+    def test_writer_idempotence_still_checks_running_workers_and_input_hash(self):
+        self.coverage_writer()
+        refinement.refine(self.result_path, "write")
+        valid = self.state()
+        state = copy.deepcopy(valid)
+        state["tasks"]["extract-0000"]["status"] = "running"
+        workflow.persist(self.base, state)
+        self.assert_refusal("running tasks", "write")
+        workflow.persist(self.base, valid)
+        path = valid["tasks"]["write"]["input"]
+        payload = workflow.read(path)
+        workflow.write(path, {**payload, "coverage_worker_contract": "tampered"})
+        self.assert_refusal("Task input changed", "write")
+
+    def test_writer_refuses_semantic_transport_and_non_coverage_budget_failures(self):
+        self.coverage_writer()
+        valid = self.state()
+        for error in ("Semantic review failed: synthetic", "Source-fidelity rejection", "Writer transport timeout",
+                      "Coverage incomplete", "semantic review: Coverage blocked", "Coverage prompt over budget", "", None):
+            with self.subTest(error=error):
+                state = copy.deepcopy(valid)
+                state["tasks"]["write"]["error"] = error
+                workflow.persist(self.base, state)
+                self.assert_refusal("Coverage blocked error", "write")
+
+    def test_writer_refuses_non_exhausted_or_noncanonical_tasks(self):
+        self.coverage_writer()
+        valid = self.state()
+        for changes in ({"attempts": 0}, {"attempts": 1}, {"attempts": 2}, {"attempts": 4}, {"attempts": True},
+                        {"status": "pending"}, {"status": "complete"}, {"id": "write-alias"}):
+            with self.subTest(changes=changes):
+                state = copy.deepcopy(valid)
+                state["tasks"]["write"].update(changes)
+                workflow.persist(self.base, state)
+                self.assert_refusal("blocked extract/reduce|canonical write", "write")
+        state = copy.deepcopy(valid)
+        state["tasks"]["write-alias"] = state["tasks"].pop("write")
+        state["tasks"]["write-alias"]["id"] = "write-alias"
+        state["levels"][-1] = ["write-alias"]
+        workflow.persist(self.base, state)
+        self.assert_refusal("canonical write", "write-alias")
+
+    def test_writer_refuses_running_tasks_source_and_input_changes(self):
+        self.coverage_writer()
+        valid = self.state()
+        for key in ("write", "extract-0000"):
+            state = copy.deepcopy(valid)
+            state["tasks"][key]["status"] = "running"
+            workflow.persist(self.base, state)
+            self.assert_refusal("running tasks", "write")
+        workflow.persist(self.base, valid)
+        for key in ("transcript_path", "segments_path"):
+            path = Path(self.result[key])
+            data = path.read_text()
+            workflow.write(path, "Synthetic source changed" if key == "transcript_path" else self.segments[:-1])
+            self.assert_refusal("Source changed", "write")
+            workflow.write(path, data)
+        path = valid["tasks"]["write"]["input"]
+        payload = workflow.read(path)
+        workflow.write(path, {**payload, "section_minimums": {"Changed": 1}})
+        self.assert_refusal("Task input changed", "write")
+        self.assert_protected()
+
+    def test_writer_refuses_same_protocol_and_invalid_migration_history(self):
+        self.coverage_writer()
+        valid = self.state()
+        path = valid["tasks"]["write"]["input"]
+        original = workflow.read(path)
+        for fields, error in (({"coverage_worker_contract": "scoped_body_coverage_v2"}, "already uses"),
+                              ({"migrated_from_input_hashes": "invalid"}, "migration history"),
+                              ({"migrated_from_input_hashes": [None]}, "migration history")):
+            payload = {**original, **fields}
+            workflow.write(path, payload)
+            state = copy.deepcopy(valid)
+            state["tasks"]["write"]["input_hash"] = workflow.digest(payload)
+            workflow.persist(self.base, state)
+            self.assert_refusal(error, "write")
+
+    def test_writer_copy_failure_keeps_old_parts_and_state(self):
+        self.coverage_writer()
+        old = self.state()
+        parts = self.files(Path(old["tasks"]["write"]["input"]).parent)
+        with patch.object(refinement.shutil, "copy2", side_effect=OSError("Synthetic disk failure")):
+            self.assert_refusal("Synthetic disk failure", "write")
+        self.assertEqual(self.files(Path(old["tasks"]["write"]["input"]).parent), parts)
+        self.assert_protected()
+
+    def test_writer_refuses_blocked_sibling_review_and_inactive_writer(self):
+        self.coverage_writer()
+        valid = self.state()
+        state = copy.deepcopy(valid)
+        state["tasks"]["extract-0000"].update(status="blocked", error="Synthetic earlier failure")
+        workflow.persist(self.base, state)
+        self.assert_refusal("active level", "write")
+        state = copy.deepcopy(valid)
+        state["tasks"]["short-review"] = {**copy.deepcopy(state["tasks"]["write"]),
+                                           "id": "short-review", "error": "Semantic review failed: synthetic"}
+        state["levels"][-1].append("short-review")
+        workflow.persist(self.base, state)
+        self.assert_refusal("all other tasks complete", "write")
+        self.assertEqual(self.state()["tasks"]["short-review"]["attempts"], 3)
+
+    def test_writer_refuses_stale_dependencies_and_changed_completed_output(self):
+        self.coverage_writer()
+        valid = self.state()
+        path = valid["tasks"]["write"]["input"]
+        payload = workflow.read(path)
+        old_payload = copy.deepcopy(payload)
+        payload["dependencies"]["reduce-01-0000"] = "stale-output-hash"
+        workflow.write(path, payload)
+        state = copy.deepcopy(valid)
+        state["tasks"]["write"]["input_hash"] = workflow.digest(payload)
+        workflow.persist(self.base, state)
+        self.assert_refusal("dependency fingerprint changed", "write")
+        workflow.write(path, old_payload)
+        workflow.persist(self.base, valid)
+        output_path = valid["tasks"]["extract-0000"]["output"]
+        output = workflow.read(output_path)
+        output["items"][0]["claim"] = "Different synthetic claim, still schema valid"
+        workflow.write(output_path, output)
+        self.assert_refusal("Completed output fingerprint changed", "write")
+
+    def test_writer_preserves_nested_evidence_refinement_bookkeeping(self):
+        self.coverage_writer()
+        old = self.state()
+        previous = {**copy.deepcopy(old["tasks"]["extract-0000"]),
+                    "id": "extract-retired", "attempts": 3, "status": "blocked"}
+        previous_record = {"children": ["extract-0000"], "snapshot": "synthetic-old-snapshot", "retry_ledger": "synthetic-old-ledger"}
+        old["superseded_tasks"] = {"extract-retired": previous}
+        old["refinements"] = {"extract-retired": previous_record}
+        old["settings"]["refinement_plan"] = [{"policy": refinement.POLICY, "task_id": "extract-retired"}]
+        workflow.persist(self.base, old)
+        receipt = refinement.refine(self.result_path, "write")
+        current = self.state()
+        self.assertEqual(current["superseded_tasks"]["extract-retired"], previous)
+        self.assertEqual(current["refinements"]["extract-retired"], previous_record)
+        self.assertEqual(current["settings"]["refinement_plan"][:-1], old["settings"]["refinement_plan"])
+        self.assertEqual(workflow.read(receipt["snapshot"]), old)
+        self.assertEqual(workflow.read(receipt["retry_ledger"])["superseded_tasks"], old["superseded_tasks"])
+
     def files(self, directory):
         return {str(p.relative_to(directory)): p.read_bytes() for p in directory.rglob("*") if p.is_file()}
 
@@ -308,13 +572,13 @@ class RefinementTests(unittest.TestCase):
             self.assertLessEqual(len(payload["leaf_ids"]), refinement.MAX_REFERENCE_NODES)
             leaves.extend(expand_refs(payload, payload["leaf_ids"]))
         self.assertEqual(leaves, expand_refs(original, original["leaf_ids"]))
-        self.assertEqual(current["settings"]["writer_format"], "chinese_markdown_independent_parts_v6")
+        self.assertEqual(current["settings"]["writer_format"], "scoped_body_coverage_v7")
         self.assertEqual({k: v for k, v in current["settings"].items() if k != "refinement_plan"},
-                         {**old["settings"], "writer_format": "chinese_markdown_independent_parts_v6"})
-        v5_settings = {**self.settings, "writer_format": "chinese_markdown_independent_parts_v6"}
+                         {**old["settings"], "writer_format": "scoped_body_coverage_v7"})
+        current_settings = {**self.settings, "writer_format": "scoped_body_coverage_v7"}
         with self.assertRaisesRegex(ValueError, "settings changed"):
             refinement.retain_refinement_plan(current, fingerprint, self.settings)
-        retained = refinement.retain_refinement_plan(current, fingerprint, v5_settings)
+        retained = refinement.retain_refinement_plan(current, fingerprint, current_settings)
         self.assertEqual(retained, current["settings"])
         self.assertEqual(workflow.digest([fingerprint, retained, workflow.PIPELINE_VERSION])[:20], current["generation"])
         disk = self.files(self.base)
@@ -490,7 +754,7 @@ class RefinementTests(unittest.TestCase):
                 state = copy.deepcopy(valid)
                 state["tasks"][parent["id"]].update(changes)
                 workflow.persist(self.base, state)
-                self.assert_refusal("blocked extract/reduce", parent["id"])
+                self.assert_refusal("blocked extract/reduce|canonical write", parent["id"])
         state = copy.deepcopy(valid)
         state["tasks"][parent["id"]]["status"] = "running"
         workflow.persist(self.base, state)

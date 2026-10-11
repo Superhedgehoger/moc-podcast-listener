@@ -74,6 +74,40 @@ Recent OpenClaw versions use per-model `models.providers.<provider>.models[].con
 
 ## Recovery / 恢复
 
+New writer inputs use `coverage_worker_contract=scoped_body_coverage_v2`.
+Coverage planning selects complete relevant body paragraphs locally, reserves each
+claim's best passage and packs contiguous evidence batches within 23K bytes.
+Oversized paragraphs split only at complete sentence boundaries. Claims and original
+IDs are not truncated; the complete report stays unchanged. A body hash invalidates
+coverage when any section changes. A scoped omission means not found in retrieved
+passages, not absence from the entire report; independent original-source coverage
+and artifact grounding remain mandatory. A returned section must be present in the
+supplied excerpts. Indivisible passages or claims still block explicitly.
+
+An exhausted canonical writer may use `refine RESULT_JSON --task write` only for
+the legacy `Coverage blocked` size error and only once, while all other tasks are
+complete and no worker is running. This changes the actual coverage input contract,
+archives the old three-start ledger and copies validated body parts without claiming
+writer completion. Unchanged part attempts and identical-prompt review verdicts,
+including negative verdicts, migrate with their original bindings. This operation
+cannot restart unrelated semantic failures or an already upgraded coverage writer.
+
+正文覆盖检查不再把整篇长稿塞进每个请求。完整相关段落按本地检索选择，证据
+和原始 ID 保留，全文不删短；原文整体覆盖与语义审稿仍必须通过。
+只针对旧版覆盖体积错误允许一次显式协议迁移，原失败记录、章节次数和有效
+否定意见都保留，不能用它重置语义失败任务。
+
+New adapter review jobs also persist a three-call protocol limit, keyed by exact
+source/task/model/config/prompt. Only malformed responses or invalid reference/schema
+bindings are retried. A valid `failed` verdict is retained, triggers related artifact
+repair, and is never rerun unchanged to obtain a different vote. Each protocol
+attempt uses a fresh non-producer session; source/config/artifact changes fail the
+audit. Existing validated review progress remains reusable. Legacy inputs retain
+their previous coordinator-start behavior.
+
+新适配器的审稿子任务同样保存独立三次协议调用上限。有效的否定结论不重抽；
+只允许格式、引用和结构错误重试，修订正文后才建立对应的新复核。
+
 State and outputs survive context loss. Resume with `status`; rerunning `prepare` with the same source and settings reuses its generation. Wait for known running workers instead of launching duplicates. If a worker failed, dispatch failed, or a session was lost, first confirm the old worker has stopped, then record failure:
 
 ```bash

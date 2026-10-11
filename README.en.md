@@ -98,6 +98,12 @@ part, preserving valid caches across parent retries. Exhausted extraction/reduct
 tasks can be explicitly split with `podcast-summary.py refine RESULT_JSON --task TASK_ID`
 while all workers are stopped. Smaller children retain source provenance; the
 failed parent's counters and full snapshot remain on disk. This is not a retry reset.
+Review jobs also retain separate three-call protocol limits. Valid negative
+judgments require artifact repair and are never rerun unchanged to fish for a pass.
+Long-draft coverage retrieves complete related passages instead of repeating the
+entire body in every request. Full-source auditing still checks coverage and fidelity;
+retrieval alone is not proof. A one-time explicit migration handles only the old
+coverage-size blocker while preserving caches, attempts and negative review records.
 Artifact-only verification cannot complete a job:
 `--require-report` is mandatory for that transition.
 

@@ -2,6 +2,18 @@
 
 ## 2026-10-11 Agnes 专项修复与续测（当前状态）
 
+最新检查点：**284 项离线测试通过。** 访谈旧写作任务因将约 75K 字节正文重复放进 23K 上限的覆盖请求，三次后 blocked。新增完整段落检索式覆盖与一次性显式协议迁移；旧三次记录、全部合格证据/正文缓存、每部分次数及相同提示的否定审稿意见保留，不重启无关语义失败。两项新的 Agnes 覆盖请求已经实际通过，处理全部 40 个证据编号，输入为 22895 / 17447 UTF-8 字节，全文未删短。后续独立原文审稿正在运行，已有通过和否定意见，尚未整集验收。
+
+长学习播客现有 65/86 个提取任务通过，覆盖 5109/6303 个原始片段，继续仅使用 Agnes。《灵动岛》仍保留三次失败；最后一个审稿协议返回非 JSON 的英文推理文本，未猜测或截取部分响应伪称通过。用户提供的课程目录已扫描 593 份元数据，尚未识别正式课程样本。正式安装及 main 未变，256K 未实测。
+
+English: 284 offline checks pass. The long interview's full body remains intact while two real scoped coverage calls pass for all 40 evidence nodes, using 22895 and 17447 UTF-8 bytes. Full-source reviewing continues with both positive and negative judgments. The long learning sample has 65/86 extraction tasks and 5109/6303 original segments covered. The short audit remains blocked after its protocol limit. No final release, formal-course or 256K acceptance is claimed.
+
+续测检查点：**266 项离线测试通过。** 《灵动岛》十个正文片段、知识与覆盖文件已生成；首个原文覆盖审稿返回有效的否定结论，涉及原文没有的年份及术语异文，不是内容通过。最终报告尚未通过。《平原上的摩西》第二层六个归纳任务均通过，进入逐片段正文写作。不能把文件生成或协议返回成功当作语义验收通过。
+
+新增独立审稿协议重试及持久记录：每个确切源/任务/模型/配置/提示键最多三次。格式、地址或结构错误可以重试；有效否定结论保留且不重抽。旧直接审稿调用计数在首次迁移时导入，避免升级清空预算。新的审核补丁有 5 项离线回归，历史输入的行为保持兼容。
+
+English: 266 offline tests pass. The short body, knowledge and coverage are written, but its first source review returned a valid rejection, not a quality pass. All six second-level interview reductions passed. Independent review protocol retries preserve previous dispatch counts; valid negative judgments are not rerun unchanged.
+
 **261 项离线测试通过；仅使用 Agnes，真实整集验收仍未通过。** 用户明确选择继续仅使用 `agnes-ai/agnes-3.0-flash`，没有将测试转录、证据或草稿发给 MiniMax。以下旧检查点仅是历史，不代表现在停止续测。
 
 - 失败提取块/归纳组新增显式 `refine`：完整片段、完整主题及原始证据不删减；新子任务输入更小，旧任务三次失败、所有合格旁支及完整状态快照保留。原文或依赖变化、正在运行的任务及不可分输入均拒绝拆分。离线覆盖包括真实准备图恢复、跨层来源与整条主题拆分，但模拟不证明总结语义质量。

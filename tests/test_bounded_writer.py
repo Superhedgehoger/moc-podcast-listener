@@ -237,6 +237,47 @@ class BoundedWriterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Coverage blocked: single leaf.*all body sections"):
             writer.coverage_requests(self.payload, self.sources, valid_sections(self.payload))
 
+    def test_scoped_coverage_keeps_long_report_and_all_leaf_claims(self):
+        self.payload["coverage_worker_contract"] = "scoped_body_coverage_v2"
+        sections = valid_sections(self.payload)
+        sections["详细总结"] = "\n\n".join(f"Claim {i % 3} mechanism case 42. " + "完整解释。" * 80 for i in range(80))
+        before = copy.deepcopy(sections)
+        requests = writer.coverage_requests(self.payload, self.sources, sections)
+        self.assertEqual(sections, before)
+        self.assertEqual([leaf for request in requests for leaf in request["leaf_ids"]], self.payload["leaf_ids"])
+        for request in requests:
+            self.assertLessEqual(request["estimated_bytes"], 23000)
+            data = json.loads(request["prompt"].split("\nINPUT DATA:\n")[1])
+            self.assertEqual(data["body_scope"]["kind"], "complete_body_excerpts")
+            self.assertEqual(request["section_scope"], list(data["sections"]))
+            self.assertNotIn(writer.QUOTE_SECTION, data["sections"])
+            self.assertTrue(all(item["details"] == "Mechanism and qualification" for item in data["claims"]))
+        self.assertEqual(requests, writer.coverage_requests(self.payload, self.sources, sections))
+
+    def test_scoped_passages_keep_sentences_decimal_values_and_fail_indivisible(self):
+        from scripts.scoped_coverage import passages
+        paragraph = ("The value is 3.14, not 300. This is complete. " * 500)
+        fragments = passages({"详细总结": paragraph})
+        self.assertEqual("".join(item["text"] for item in fragments), paragraph)
+        self.assertTrue(any("3.14" in item["text"] for item in fragments))
+        self.assertTrue(all(len(item["text"].encode("utf-8")) <= 8000 for item in fragments))
+        with self.assertRaisesRegex(ValueError, "indivisible body passage"):
+            passages({"详细总结": "x" * 8001})
+
+    def test_scoped_body_hash_changes_even_for_unretrieved_new_content(self):
+        self.payload["coverage_worker_contract"] = "scoped_body_coverage_v2"
+        sections = valid_sections(self.payload)
+        first = writer.coverage_requests(self.payload, self.sources, sections)
+        sections["延伸思考与局限"] += "\n\nA separate unchanged-topic limitation."
+        second = writer.coverage_requests(self.payload, self.sources, sections)
+        self.assertNotEqual(first[0]["coverage_scope"]["whole_body_hash"], second[0]["coverage_scope"]["whole_body_hash"])
+
+    def test_scoped_coverage_does_not_truncate_oversized_evidence(self):
+        self.payload["coverage_worker_contract"] = "scoped_body_coverage_v2"
+        self.payload["entries"][0]["evidence"]["items"][0]["details"] = "evidence " * 4000
+        with self.assertRaisesRegex(ValueError, "Coverage blocked: complete claims"):
+            writer.coverage_requests(self.payload, self.sources, valid_sections(self.payload))
+
     def test_knowledge_provenance_over_budget_fails_without_dropping_ids(self):
         leaves = [f"leaf-{i}" for i in range(500)]
         self.payload["leaf_ids"] = leaves

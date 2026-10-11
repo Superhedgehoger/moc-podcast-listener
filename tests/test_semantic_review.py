@@ -46,6 +46,100 @@ class SemanticReviewTests(unittest.TestCase):
         return review.run_review(self.task, self.payload, "provider/current", str(self.config),
                                  600, self.invoke, self.requests)
 
+    def test_independent_review_protocol_retries_and_reuses_valid_progress(self):
+        self.payload["part_retry_contract"] = "independent_parts_v1"
+        calls = []
+
+        def respond(*args):
+            calls.append(args[-1])
+            record = {**self.record, "sessionId": f"review-{len(calls)}"}
+            write(args[-1] / "worker-run.json", record)
+            return ({} if len(calls) == 1 else copy.deepcopy(self.verdict)), record
+
+        self.invoke.side_effect = respond
+        self.assertEqual(self.run_review()["status"], "passed")
+        self.assertEqual(len(calls), 2)
+        self.task["attempts"] = 2
+        self.assertEqual(self.run_review()["status"], "passed")
+        self.assertEqual(len(calls), 2)
+        ledger = read(next((self.path / "review-retries/dispatch-ledgers").glob("*.json")))
+        self.assertEqual([row["status"] for row in ledger["attempts"]], ["failed", "passed"])
+
+    def test_review_protocol_exhaustion_survives_parent_retry(self):
+        self.payload["part_retry_contract"] = "independent_parts_v1"
+        calls = []
+
+        def invalid(*args):
+            calls.append(args[-1])
+            record = {**self.record, "sessionId": f"review-{len(calls)}"}
+            write(args[-1] / "worker-run.json", record)
+            return {}, record
+
+        self.invoke.side_effect = invalid
+        with self.assertRaisesRegex(ValueError, "retry limit exhausted"):
+            self.run_review()
+        self.assertEqual(len(calls), 3)
+        self.task["attempts"] = 2
+        with self.assertRaisesRegex(ValueError, "retry limit exhausted"):
+            self.run_review()
+        self.assertEqual(len(calls), 3)
+
+    def test_valid_semantic_rejection_is_not_retried_for_a_different_vote(self):
+        self.payload["part_retry_contract"] = "independent_parts_v1"
+        self.verdict.update(status="failed", reason="Original role is researcher, not manager",
+                            findings=[{"part": "Summary", "reason": "The original identifies researcher role",
+                                       "source_quote": "Alice is the researcher."}])
+        with self.assertRaisesRegex(ValueError, "Semantic review failed"):
+            self.run_review()
+        self.assertEqual(self.invoke.call_count, 1)
+
+    def test_input_contract_migration_reuses_negative_verdict_for_identical_prompt(self):
+        self.payload["part_retry_contract"] = "independent_parts_v1"
+        self.verdict.update(status="failed", reason="Original role is researcher, not manager",
+                            findings=[{"part": "Summary", "reason": "Original researcher role is explicit",
+                                       "source_quote": "Alice is the researcher."}])
+        with self.assertRaisesRegex(ValueError, "Semantic review failed"):
+            self.run_review()
+        self.assertEqual(self.invoke.call_count, 1)
+        self.payload["migrated_from_input_hashes"] = [self.task["input_hash"]]
+        self.task["input_hash"] = "new-contract"
+        write(self.task["output"], {"input_hash": "new-contract"})
+        with self.assertRaisesRegex(ValueError, "Semantic review failed"):
+            self.run_review()
+        self.assertEqual(self.invoke.call_count, 1)
+        self.task["attempts"] = 2
+        with self.assertRaisesRegex(ValueError, "Semantic review failed"):
+            self.run_review()
+        self.assertEqual(self.invoke.call_count, 1)
+
+    def test_review_retry_refuses_reused_session_after_invalid_response(self):
+        self.payload["part_retry_contract"] = "independent_parts_v1"
+        replies = iter([{}, self.verdict])
+        self.invoke.side_effect = lambda *args: (next(replies), copy.deepcopy(self.record))
+        with self.assertRaisesRegex(OSError, "fresh non-producer"):
+            self.run_review()
+        self.assertEqual(self.invoke.call_count, 2)
+
+    def test_review_retry_migrates_existing_dispatches_without_resetting_budget(self):
+        self.payload["part_retry_contract"] = "independent_parts_v1"
+        plan = review.plan_review(self.payload, (self.path / "body.md").read_text(),
+                                  read(self.path / "knowledge.draft.json"), ["Summary", "knowledge"])
+        job = plan["jobs"][0]
+        bindings = {"input_hash": self.task["input_hash"], "source_hash": digest(self.source),
+                    "config_hash": digest(read(self.config)), "model": "provider/current"}
+        key = digest([bindings, job["job_id"], digest(job["prompt"])])
+        for attempt in (1, 2):
+            write(self.path / "reviews" / f"attempt-{attempt}" / key / "worker-run.json",
+                  {**self.record, "sessionId": f"old-{attempt}"})
+        self.task["attempts"] = 3
+        self.invoke.side_effect = lambda *args: ({}, copy.deepcopy(self.record))
+        with self.assertRaisesRegex(ValueError, "retry limit exhausted"):
+            self.run_review()
+        self.assertEqual(self.invoke.call_count, 1)
+        ledger = read(self.path / "review-retries/dispatch-ledgers" / f"{key}.json")
+        self.assertEqual(len(ledger["attempts"]), 3)
+        self.assertTrue(all("migrated_from" in row for row in ledger["attempts"][:2]))
+
     def long_fixture(self, count=4):
         """3K complete original units and multi-shard artifacts, not quality evidence."""
         self.source = []

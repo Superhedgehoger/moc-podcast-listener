@@ -128,18 +128,19 @@ def prepare(result_path, target_tokens=8000, synthesis_tokens=24000, model=None)
     base = workflow_dir(result)
     settings = {"target_tokens": target_tokens, "synthesis_tokens": synthesis_tokens, "model": model,
                 "chunk_format": "segment_json_ordinal_ids_v2", "worker_contract": "source_selection_v2",
-                "max_primary_segments": 96, "writer_format": "verbatim_name_evidence_pieces_v4",
+                "max_primary_segments": 96, "writer_format": "chinese_markdown_independent_parts_v6",
                 "reduce_worker_contract": "topic_jsonl_records_v1",
                 "evidence_budget_format": "content6000_serialized8000_v3"}
     settings["reference_format"] = "opaque_records_v1"
     settings["quality_contract"] = "linear_source_grounding_v4"
     from scripts.linear_review import prompt_fingerprint
     settings["review_prompt_hash"] = prompt_fingerprint()
+    old = read(base / "state.json") if (base / "state.json").exists() else None
+    from refine_workflow import retain_refinement_plan
+    settings = retain_refinement_plan(old, fingerprint, settings)
     generation_id = digest([fingerprint, settings, PIPELINE_VERSION])[:20]
     generation = base / generation_id
-    old = None
     if (base / "state.json").exists():
-        old = read(base / "state.json")
         if old.get("generation") == generation_id:
             return status(result_path)
         if any(task.get("status") == "running" for task in old.get("tasks", {}).values()):
@@ -533,6 +534,8 @@ def status(result_path):
                 "source_type": episode.get("source"),
                 "duration_minutes": duration, "section_minimums": listener().report_section_minimums(duration),
                 "semantic_review_required": True,
+                "part_retry_contract": "independent_parts_v1",
+                "writer_prompt_version": "chinese_markdown_v6",
                 "semantic_review_contract": state["settings"]["quality_contract"],
                 "report_workflow": str(references / "report-workflow.md"),
                 "knowledge_workflow": str(references / "knowledge-workflow.md"),

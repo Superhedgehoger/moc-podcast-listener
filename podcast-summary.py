@@ -5,11 +5,12 @@ import json
 import sys
 
 from summary_workflow import prepare, status, assemble, task_event, locate, read, validate_task
+from refine_workflow import refine
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("prepare", "status", "assemble", "start", "fail", "locate", "check"))
+    parser.add_argument("command", choices=("prepare", "refine", "status", "assemble", "start", "fail", "locate", "check"))
     parser.add_argument("result", help="Absolute path to result.json (task.json for check)")
     parser.add_argument("--task")
     parser.add_argument("--evidence")
@@ -27,6 +28,10 @@ def main():
             value = {"ok": True, "task": task["id"]}
         elif args.command == "prepare":
             value = prepare(args.result, args.target_tokens, args.synthesis_tokens, args.model)
+        elif args.command == "refine":
+            if not args.task:
+                parser.error("--task required")
+            value = refine(args.result, args.task)
         elif args.command == "locate":
             if not args.evidence:
                 parser.error("--evidence required")

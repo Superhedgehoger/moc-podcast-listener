@@ -93,6 +93,11 @@ and resumes hash-bound progress. Missing retrieved support still fails; processi
 coverage is not a measure of factual accuracy.
 Long-source audits still need full live validation and cost measurements; see the
 [validation record](VALIDATION-v4.17.0.md).
+New adapter body parts use plain Markdown and persistent three-call limits per
+part, preserving valid caches across parent retries. Exhausted extraction/reduction
+tasks can be explicitly split with `podcast-summary.py refine RESULT_JSON --task TASK_ID`
+while all workers are stopped. Smaller children retain source provenance; the
+failed parent's counters and full snapshot remain on disk. This is not a retry reset.
 Artifact-only verification cannot complete a job:
 `--require-report` is mandatory for that transition.
 

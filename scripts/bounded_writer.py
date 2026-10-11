@@ -23,7 +23,9 @@ BUDGET = 24000
 REQUEST_BUDGET = BUDGET - 1000  # Reserve bounded repair diagnostics inside the full message ceiling.
 QUOTE_SECTION = "关键引述"
 COMMON = (
-    "You are an independent Chinese podcast evidence writer. Return ONLY the requested JSON object. "
+    "所有正文必须用简体中文撰写；英文仅保留原文已经出现的术语。"
+    "人名逐字沿用原文，不得翻译、补全或纠正拼写；原文未确认的名字标注未确认，必要时只保留姓氏。\n"
+    "You are an independent Chinese podcast evidence writer. Return ONLY the requested output format. "
     "Do not call tools, read files, browse, or invent sources, identities, names, links or background. "
     "Copy name spellings verbatim from original_source_context or verified source quotations, even when ASR spelling looks wrong. "
     "Do not standardize names or combine a given name from one spelling with a surname from another. "
@@ -120,7 +122,8 @@ def _request(kind, name, instruction, data):
     if size > REQUEST_BUDGET:
         raise ValueError(f"Writer request {name!r} exceeds {REQUEST_BUDGET} UTF-8 bytes ({size}); "
                          "reduce evidence upstream; no evidence was truncated")
-    return {"kind": kind, "name": name, "prompt": prompt, "estimated_bytes": size}
+    return {"kind": kind, "name": name, "prompt": prompt, "estimated_bytes": size,
+            "response_format": "markdown" if kind in {"section", "section_piece"} else "json"}
 
 
 def bounded_source_context(payload):
@@ -199,7 +202,7 @@ def detail_requests(payload):
         if context is not None:
             data["original_source_context"] = context
         request = _request("section_piece", f"详细总结/part-{index:04d}", (
-            'Return {"text":STRING}: Chinese paragraphs developing ONLY this evidence group, no headings. '
+            'Return plain Markdown paragraphs developing ONLY this evidence group, no headings, JSON wrapper or commentary. '
             "This is one part of a detailed report, not an overview of the entire episode. "
             "Explain the actual argument, its concrete examples, reasoning and qualifications. "
             "Do not repeat other topics, invent background, add timestamps or pad with filler. "
@@ -260,6 +263,12 @@ def validate_section(name, text, payload, sources):
     for url in re.findall(r"https?://[^\s<>\]\)]+", text):
         if url not in evidence_text:
             raise ValueError(f"Section URL is absent from supplied evidence: {url}")
+    context = bounded_source_context(payload)
+    if context is not None:
+        from summary_workflow import unseen_proper_names
+        unknown = unseen_proper_names(text, "\n".join(segment["text"] for segment in context))
+        if unknown:
+            raise ValueError("Source-absent proper names: " + ", ".join(unknown))
     return text
 
 
@@ -362,7 +371,7 @@ def plan(payload, sources):
                 "target_visible_chars": max(minimum + 160, int(minimum * 1.8)),
                 **_evidence(payload, FIELDS[name])}
         requests.append(_request("section", name, (
-            'Return {"text":STRING} containing only this section content, NO Markdown headings. '
+            'Return plain Markdown containing only this section content, NO headings, JSON wrapper or commentary. '
             "Write detailed Chinese prose above the strict visible-character minimum, aiming for the target. "
             "Do not pad by repetition or replace detailed sections with the overview. "
             "Do not add timestamps to this body section. " + FOCUS[name]

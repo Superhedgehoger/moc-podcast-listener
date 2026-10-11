@@ -1,6 +1,19 @@
 # v4.17.0 验证记录 / Validation Record
 
-## 2026-10-11 最终检查点（优先于下方历史记录）
+## 2026-10-11 Agnes 专项修复与续测（当前状态）
+
+**261 项离线测试通过；仅使用 Agnes，真实整集验收仍未通过。** 用户明确选择继续仅使用 `agnes-ai/agnes-3.0-flash`，没有将测试转录、证据或草稿发给 MiniMax。以下旧检查点仅是历史，不代表现在停止续测。
+
+- 失败提取块/归纳组新增显式 `refine`：完整片段、完整主题及原始证据不删减；新子任务输入更小，旧任务三次失败、所有合格旁支及完整状态快照保留。原文或依赖变化、正在运行的任务及不可分输入均拒绝拆分。离线覆盖包括真实准备图恢复、跨层来源与整条主题拆分，但模拟不证明总结语义质量。
+- 正文片段改用 Markdown，知识、覆盖与独立审稿保留结构化输出。每个片段的三次调用次数跨父任务启动持久保存，缓存按模型/配置/提示/输出绑定；父写作任务仍只有三次启动。
+- 《灵动岛》Markdown 写作测试 `21dfa9373744cf28e713` 的三个片段通过，但详细正文片段三次仍引入源中没有的英文人名而 blocked。未伪称完整验收通过。新增中文优先和原样姓名明确提示及章节级检查，建立新提示代际 `8712aaccad8d3e4357fd`；旧记录保留。
+- 《平原上的摩西》16 个提取块与原先两个合格归纳组复用；失败归纳组拆分为四个新任务，全部真实通过，随后剩余归纳组也通过。下一层三次超过 6K 输出预算，已在完整主题边界重新拆为五个任务，尚待模型验证。所有原始证据成员继续绑定。
+- 《纵横四海 EP86》旧失败提取块拆为三个子任务，全部真实通过，其中一个经历一次严格 JSON 解析失败后第二次通过。31 个既有合格块保留，另一个后续块通过，当前 35/86 个提取任务完成，对应 2610/6303 个完整原始片段。后续一块首次解析失败，尚余两次，停在可恢复检查点；不能将拆分后的任务计数当作 35/84 原始块覆盖率。
+- 128K 调用配置继续用于实际 Agnes 会话；输入预算、模型标称容量和真实峰值上下文分开报告。尚无 256K 容量实测，正式课程样本仍未在用户给定目录中识别。没有更新 OpenClaw 正式安装或合并 GitHub main。
+
+English: 261 offline checks pass. Only the authorized Agnes model is used. Smaller whole-input refinement preserves failed parent ledgers and validated siblings. Three short sections and all four refined interview reductions passed, but the short writer and a later interview reduction still failed their three-attempt gates. All three refined long-podcast extraction children passed; 35/86 extraction tasks now cover 2610/6303 original segments. Further live validation is in progress; no full-episode quality, formal-course or 256K acceptance is claimed, and the stable installation/main remain unchanged.
+
+## 2026-10-11 旧检查点（历史）
 
 **238 项离线测试通过，真实整集验收未通过。** 所有本轮测试进程已结束，临时调用配置已清理。修复已推送草稿升级分支；GitHub main 与 OpenClaw 正式安装仍为原版本。
 

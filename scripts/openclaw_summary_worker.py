@@ -117,6 +117,33 @@ def parse_reduce_records(text, expected_hash):
     return output
 
 
+def parse_section_response(text, diagnostics=None):
+    """Accept body text directly; complete legacy wrappers remain lossless."""
+    value = text.strip()
+    if value.startswith("```markdown") or value.startswith("```md\n"):
+        lines = value.splitlines()
+        if len(lines) < 3 or lines[-1].strip() != "```":
+            raise ValueError("Incomplete Markdown fence")
+        value = "\n".join(lines[1:-1])
+    elif value.startswith("{") or value.startswith("[{") or value.startswith("[\n{") or value.startswith("```json"):
+        wrapped = parse_response(value, diagnostics)
+        if set(wrapped) != {"text"} or not isinstance(wrapped["text"], str):
+            raise ValueError("Section wrapper must contain only its complete text")
+        value = wrapped["text"]
+    elif value.startswith('"'):
+        try:
+            wrapped = json.loads(value)
+        except json.JSONDecodeError:
+            pass
+        else:
+            if not isinstance(wrapped, str):
+                raise ValueError("Section text must be a complete string")
+            value = wrapped
+    if not value.strip():
+        raise ValueError("Section body is empty")
+    return {"text": value}
+
+
 def source_catalog(payload):
     """Address exact, bounded source excerpts without asking a model to copy them."""
     catalog = {}
@@ -444,7 +471,9 @@ def invoke(task, workspace, prompt, model, config, timeout, directory):
             raise ValueError(f"Host used {actual}, not the requested current model {model}")
         diagnostics = []
         payload = read(task["input"]) if task["kind"] == "reduce" else {}
-        if payload.get("worker_reduce_contract") == "topic_jsonl_records_v1":
+        if task.get("response_format") == "markdown":
+            response = parse_section_response(envelope["final"], diagnostics)
+        elif payload.get("worker_reduce_contract") == "topic_jsonl_records_v1":
             response = parse_reduce_records(envelope["final"], task["input_hash"])
         else:
             response = parse_response(envelope["final"], diagnostics)
@@ -500,11 +529,38 @@ def run_writer(task, model, config, timeout):
         return _run_writer(task, model, private, timeout)
 
 
+def bounded_part_attempts(directory, binding, execute):
+    """Retain the three-start limit of each independent part across parent retries."""
+    path = Path(directory) / "dispatch-ledgers" / f"{binding}.json"
+    ledger = read(path) if path.exists() else {"binding": binding, "attempts": []}
+    if ledger.get("binding") != binding or not isinstance(ledger.get("attempts"), list):
+        raise ValueError("Part retry ledger is corrupt")
+    for index in range(len(ledger["attempts"]), 3):
+        row = {"attempt": index + 1, "status": "running", "started_at": time.time()}
+        ledger["attempts"].append(row)
+        write(path, ledger)
+        try:
+            value = execute(index + 1)
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            row.update(status="failed", error=str(exc), finished_at=time.time())
+            write(path, ledger)
+            if isinstance(exc, OSError):
+                raise
+        else:
+            row.update(status="passed", output_hash=digest(value), finished_at=time.time())
+            write(path, ledger)
+            return value
+    reason = ledger["attempts"][-1].get("error", "Previous part output needs repair")
+    raise ValueError("Part retry limit exhausted: " + reason)
+
+
 def _run_writer(task, model, config, timeout):
     from scripts import bounded_writer
     payload = read(task["input"])
     sources = writer_sources(payload)
     requests = bounded_writer.plan(payload, sources)
+    for request in requests:
+        request["base_prompt_hash"] = digest(request["prompt"])
     workspace = task.get("workspace") or str(Path(task["input"]).parent.parent)
     directory = Path(task["output"]).parent
     repair_path = directory / "semantic-repair.json"
@@ -522,7 +578,9 @@ def _run_writer(task, model, config, timeout):
     config_path = Path(config) if config else Path.home() / ".openclaw/openclaw.json"
     config_hash = digest(read(config_path)) if config_path.exists() else None
 
-    def dispatch(request):
+    cache_missing = object()
+
+    def dispatch_once(request, call_number=None, cached_only=False):
         key = digest([request["kind"], request["name"]])[:16]
         part = directory / "parts" / key
         cache = part / "validated.json"
@@ -544,7 +602,11 @@ def _run_writer(task, model, config, timeout):
                         return saved["value"]
                 else:
                     return saved["value"]
+        if cached_only:
+            return cache_missing
         log_dir = part / f"attempt-{task['attempts']}"
+        if call_number is not None:
+            log_dir /= f"part-call-{call_number}"
         prompt = request["prompt"]
         rejection = part / "rejection.json"
         if rejection.exists():
@@ -552,11 +614,15 @@ def _run_writer(task, model, config, timeout):
             diagnostic = diagnostic.encode("utf-8")[:300].decode("utf-8", errors="ignore")
             prompt += "\nPrevious part rejection; repair this issue using source evidence, not filler:\n" + diagnostic
         try:
-            value, record = invoke(task, workspace, prompt, model, config, timeout, log_dir)
+            value, record = invoke({**task, "response_format": request.get("response_format", "json")},
+                                   workspace, prompt, model, config, timeout, log_dir)
         except (ValueError, KeyError, TypeError) as exc:
             write(rejection, {"error": str(exc)})
+            if (log_dir / "worker-run.json").exists():
+                metrics.append({"part": request["name"], "part_attempt": call_number,
+                                **read(log_dir / "worker-run.json")})
             raise
-        metrics.append({"part": request["name"], **record})
+        metrics.append({"part": request["name"], "part_attempt": call_number, **record})
         try:
             if request["kind"] == "section_piece":
                 base_request = next(item for item in bounded_writer.detail_requests(payload) if item["name"] == request["name"])
@@ -585,6 +651,17 @@ def _run_writer(task, model, config, timeout):
                       "sessionId": record.get("sessionId")})
         rejection.unlink(missing_ok=True)
         return value
+
+    def dispatch(request):
+        cached = dispatch_once(request, cached_only=True)
+        if cached is not cache_missing:
+            return cached
+        if payload.get("part_retry_contract") != "independent_parts_v1":
+            return dispatch_once(request)
+        key = digest([request["kind"], request["name"]])[:16]
+        binding = digest([task["input_hash"], request.get("base_prompt_hash", digest(request["prompt"])), model, config_hash])
+        return bounded_part_attempts(directory / "parts" / key, binding,
+                                     lambda number: dispatch_once(request, call_number=number))
 
     try:
         knowledge = None

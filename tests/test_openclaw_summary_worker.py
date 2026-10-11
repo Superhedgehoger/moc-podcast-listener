@@ -510,6 +510,39 @@ class WorkerAdapterTests(unittest.TestCase):
 
 
 class ReductionRecordTests(unittest.TestCase):
+    def test_markdown_body_transport_preserves_complete_text_and_rejects_partial_wrappers(self):
+        body = '原文中的观点需要保留。\n\n"引号"不会损坏正文传输。'
+        self.assertEqual(worker.parse_section_response(body), {"text": body})
+        self.assertEqual(worker.parse_section_response("```markdown\n" + body + "\n```"), {"text": body})
+        self.assertEqual(worker.parse_section_response(json.dumps({"text": body})), {"text": body})
+        self.assertEqual(worker.parse_section_response(json.dumps(body)), {"text": body})
+        for text in ("", "```markdown\n" + body, '{"text":"incomplete',
+                     json.dumps({"text": body, "extra_evidence": "Do not drop"})):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                worker.parse_section_response(text)
+
+    def test_independent_part_retries_persist_across_parent_attempts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            calls = []
+            def failing(number):
+                calls.append(number)
+                raise ValueError("Quote does not match source")
+            with self.assertRaisesRegex(ValueError, "retry limit exhausted"):
+                worker.bounded_part_attempts(tmp, "same-source", failing)
+            self.assertEqual(calls, [1, 2, 3])
+            with self.assertRaisesRegex(ValueError, "retry limit exhausted"):
+                worker.bounded_part_attempts(tmp, "same-source", failing)
+            self.assertEqual(calls, [1, 2, 3])
+            ledger = worker.read(Path(tmp) / "dispatch-ledgers/same-source.json")
+            self.assertEqual([a["status"] for a in ledger["attempts"]], ["failed"] * 3)
+            def recovering(number):
+                if number == 1:
+                    raise ValueError("Incomplete response")
+                return "Validated body"
+            self.assertEqual(worker.bounded_part_attempts(tmp, "changed-input", recovering), "Validated body")
+            changed = worker.read(Path(tmp) / "dispatch-ledgers/changed-input.json")
+            self.assertEqual([a["status"] for a in changed["attempts"]], ["failed", "passed"])
+
     def test_single_complete_object_wrapper_preserves_data_without_selecting_multiple_records(self):
         value = {"text": "Verbatim body with quoted words", "evidence": ["r0", "r1"]}
         diagnostics = []

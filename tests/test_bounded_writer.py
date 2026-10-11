@@ -4,6 +4,7 @@ import importlib.util
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("bounded_writer", ROOT / "scripts/bounded_writer.py")
@@ -127,6 +128,14 @@ class BoundedWriterTests(unittest.TestCase):
         self.assertEqual(len(data["claims"]), 3)
         self.assertIn("not merely mentions its ID or topic", request["prompt"])
         self.assertIn("provisional allocation", request["prompt"])
+
+    def test_section_rejects_source_absent_names_before_caching(self):
+        name = "内容摘要"
+        text = "x" * self.payload["section_minimums"][name]
+        with patch.object(writer, "bounded_source_context", return_value=[{"text": "原文只提到库哈斯。"}]):
+            self.assertEqual(writer.validate_section(name, text, self.payload, self.sources), text)
+            with self.assertRaisesRegex(ValueError, "Source-absent proper names"):
+                writer.validate_section(name, text + " Rem Koolhaas", self.payload, self.sources)
 
     def test_coverage_can_check_actual_sections(self):
         sections = valid_sections(self.payload)

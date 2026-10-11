@@ -69,7 +69,7 @@ Read [references/storage-and-speakers.md](references/storage-and-speakers.md) wh
 
 ## Summarize
 
-Read [references/low-context-workflow.md](references/low-context-workflow.md) to coordinate all new summaries. New results carry `summary_workflow_version=1`. Run `podcast-summary.py prepare/status/start/fail/assemble` as described there. Dispatch task instruction paths through host `sessions_spawn` or an equivalent independent-session mechanism, at concurrency 2 using the current model. Scripts do not perform inference. Without independent workers, report the blocker; do not summarize the whole transcript in the main session.
+Read [references/low-context-workflow.md](references/low-context-workflow.md) to coordinate all new summaries. New results carry `summary_workflow_version=1`. Run `podcast-summary.py prepare/status/start/fail/refine/assemble` as described there. Dispatch task instruction paths through host `sessions_spawn` or an equivalent independent-session mechanism, at concurrency 2 using the current model. Scripts do not perform inference. Without independent workers, report the blocker; do not summarize the whole transcript in the main session.
 
 The independent writer reads [references/report-workflow.md](references/report-workflow.md) and [references/knowledge-workflow.md](references/knowledge-workflow.md). Keep a quick overview in `内容摘要` and retain every detailed report section; smaller context does not mean a shorter report.
 

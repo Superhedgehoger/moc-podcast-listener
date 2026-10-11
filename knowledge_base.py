@@ -154,8 +154,8 @@ def evidence_matches_segments(
             segment = segments[index + window_size - 1]
             combined += str(segment.get("text") or "")
             window_end = float(segment.get("end") or segment.get("start") or window_end)
-            if target in normalize_evidence_text(combined):
-                return start <= window_end + 8.0 and end >= window_start - 8.0
+            if target in normalize_evidence_text(combined) and start <= window_end + 8.0 and end >= window_start - 8.0:
+                return True
     return False
 
 

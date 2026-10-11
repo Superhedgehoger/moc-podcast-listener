@@ -2,7 +2,7 @@
 
 **简体中文** | [English](README.en.md) | [多语言首页](README.md)
 
-> 版本：v4.16.0
+> 版本：v4.17.0
 > 核心流程：输入单集或课时 → 优先复用转录/仅提取音轨 → 来源归档 → 证据化总结 → 个人笔记 → 检索与导出
 
 很多播客值得反复查阅，但音频不方便搜索，Show Notes 中的图片和链接也可能失效。
@@ -40,6 +40,7 @@
 | `scripts/backfill_shownotes_links.py` | 为历史 Show Notes 清洗并补齐人类可读链接归档 |
 | `listen-and-summarize.sh` | 一键转录入口，结束后打印 Agent 后续任务指令 |
 | `chunk_transcript.py` | 超长转录稿分块工具，用于逐块证据提取 |
+| `podcast-summary.py` / `summary_workflow.py` | 小上下文磁盘任务、覆盖校验、恢复与报告装配；模型推理由宿主执行 |
 | `quick-listen.py` | 快速入口，复用主流程并默认使用 Whisper small |
 | `media_store.py` | 将 Show Notes 和图片同步到本地同步盘、WebDAV 或 S3/R2 |
 | `diarize_segments.py` | 可选的说话人分离与时间戳对齐 |
@@ -82,9 +83,9 @@ cd moc-podcast-listener
 - 节目名 + 单集标题关键词搜索
 
 YouTube 和 Bilibili 通过 `yt-dlp` 只选择独立音频流，不下载视频画面。输入本地课程视频时，
-脚本使用 `ffmpeg -vn` 只提取第一条音轨；中间音频在完成后默认删除。多课时课程建议每节课
-分别运行一次，这样每节都有独立转录稿、字幕、总结、状态和恢复点。需要保留提取出的音频时
-再加 `--keep-audio`。
+脚本使用 `ffmpeg -vn` 只提取第一条音轨；下载/提取的音频和 WAV 默认保留。多课时课程建议每节课
+分别运行一次，这样每节都有独立转录稿、字幕、总结、状态和恢复点。需要清理本次创建的音频时
+设置 `KEEP_AUDIO=0`；`--keep-audio` 可覆盖该清理设置，用户原始本地媒体不会删除。
 
 快速检查或只归档 Show Notes：
 
@@ -273,24 +274,61 @@ Whisper 会使用 `initial_prompt` 注入节目标题和嘉宾/说话人候选�
 
 ---
 
-## 超长转录稿分块
+## v4.17.0 小上下文工作流与升级
 
-转录稿超过 30000 字时，按 `SKILL.md` 推荐使用证据提取流程。可先运行：
+所有长度的转录均使用磁盘任务，不再按 30000 字阈值让主会话读取全文。
+主会话只调度，宿主通过 `sessions_spawn` 或等价独立会话能力以当前模型执行，
+最多并发 2 个。脚本不调用模型 API；宿主无独立会话能力时明确报告阻塞。
 
 ```bash
-python3 chunk_transcript.py "$HOME/Documents/播客总结/转录稿/{节目名称}_{播客标题}_{发布日期}_转录稿.txt"
+python3 podcast-summary.py prepare "RESULT_JSON"
+python3 podcast-summary.py status "RESULT_JSON"
+python3 podcast-summary.py start "RESULT_JSON" --task "TASK_ID"
+# 宿主启动工作会话，完成后再次 status；失败且会话已停止时使用 fail。
+python3 podcast-summary.py fail "RESULT_JSON" --task "TASK_ID" --reason "失败原因"
+# status 为 ready_to_assemble 时：
+python3 podcast-summary.py assemble "RESULT_JSON"
+python3 podcast-listener.py --verify "RESULT_JSON" --require-report
 ```
 
-默认每块约 8000 字，并从第二块开始附带上一块结尾 400 字上下文。工具会生成：
+`RESULT_JSON` 为转录作业返回的绝对结果路径。状态和任务存于资料包的 `总结过程/`。
+先逐块提取证据，超预算时分层归并，再由独立写作会话完成一次正式正文；
+`内容摘要` 提供速读概览，但九个详细正文区和逐区覆盖门槛保持不变。
+Show Notes 只由装配器归档，不作为正文证据，个人笔记不得覆盖。
 
-```text
-{标题}_转录稿_chunks/
-├── chunk_01.txt
-├── chunk_02.txt
-└── REFINE_MANIFEST.md
-```
+新增可选[分任务适配器](scripts/openclaw_summary_worker.py)：提取时选择原文位置，由
+程序保存原样引述；写作按章节、知识洞察和覆盖检查分别调用独立 OpenClaw 会话。
+合格章节按输入哈希复用，避免整篇重写，过程文件仍在每期资料包内部。
+先启动任务，再传入 `task.json` 和当前模型；沿用相同校验及三次启动限制。
+该适配器仍属实验性路径；部分分块通过不等于整集语义质量已验证。
+最新实测也发现“机械核验通过但语义错误”的情况；新写作任务必须通过独立原文审查。
+证据改用短引用节点，完整原始 ID 保存在带哈希的本地注册表中，避免反复占用模型上下文。新审稿流程分别检查原文覆盖和稿件依据，调用数量随原文批次与稿件分片相加，不再两两组合；每次仍限制输入大小，保留原段时间戳并支持核验进度恢复。新 v5 审核检索不足时先返回待补证，最多两轮有界回查，再独立复核；不能把检索不到当成原文没有，也不能把流程覆盖率当作内容准确率。长内容的完整质量与成本仍需实测，详见[真实验证记录](VALIDATION-v4.17.0.md)。
 
-Agent 应对每块独立提取观点、证据、实体和引述，合并去重后只生成一次正式报告。
+逐条断言、数字和经过校验的证据来源优先保留；格式重试会反馈上一轮具体校验错误。
+补证共享原三次调用上限，旧记录不清零；有效否定回执保存后不再重抽，存储失败也不会重新投票。
+
+原文覆盖批次先预留完整相邻原句，再补充可选正文候选，避免预算挤掉人物归属上下文。
+稿件入队时检查完整序列化请求；可分内容超限则按完整句拆分，不把分项预算当作完整请求预算。
+这些规划回归已离线通过，但不代表新规划的真实总结质量已验收。
+普通文件检查不能完成后台作业；必须使用 `--require-report` 通过最终核验。
+
+新适配器的正文片段直接返回 Markdown，每个片段的三次调用上限独立持久保存。
+提取或归纳任务三次失败后，可在所有任务停止时显式运行
+`podcast-summary.py refine RESULT_JSON --task TASK_ID`，拆成更小的完整输入。
+合格结果复用，原失败次数、证据来源和旧状态快照保留，不以拆分名义清空重试记录。
+审稿子任务也独立保存三次协议调用上限；有效否定结论必须修订对应稿件，
+不能不断重新审稿直到获得通过票。
+长正文的覆盖检查改为本地选择完整相关段落，不在每次请求中重复整篇草稿；
+全文不删短，原文覆盖与语义审稿仍必须通过。旧版覆盖体积错误可显式迁移一次，
+保留章节缓存、尝试次数和已有否定意见，不能借此重启无关的语义失败。
+
+升级时使用同一版本的脚本和参考文档。新结果带 `summary_workflow_version=1`，
+最终核验额外调用 `validate_workflow`；旧结果无该字段则保留原有兼容核验，
+不自动迁移或重做报告。重做旧结果须先备份，再显式启用并跑完整流程。
+参数预算、失败重试、恢复及升级细节见 [小上下文工作流](references/low-context-workflow.md)。
+
+验证必须区分模拟与真实运行：fixture、mock 或模拟产物测试通过，不等于宿主实际
+启动当前模型并生成报告的 live 端到端验证，不能据此前者宣称真实摘要质量已验证。
 
 ---
 
@@ -300,7 +338,7 @@ Agent 应对每块独立提取观点、证据、实体和引述，合并去重�
 |------|--------|------|
 | `WHISPER_MODEL` | `large-v3` | 首选 Whisper 模型 |
 | `OUTPUT_DIR` | `~/Documents/播客总结` | 输出目录 |
-| `KEEP_AUDIO` | `0` | 设为 `1` 时保留临时音频和 WAV |
+| `KEEP_AUDIO` | `1` | 默认保留音频和 WAV；设为 `0` 请求清理本次创建的音频，`--keep-audio` 优先保留 |
 | `FORCE_TRANSCRIBE` | `0` | 设为 `1` 时忽略匹配缓存并重新转录 |
 | `ASR_ENGINE` | `sensevoice` | `sensevoice`、`whisper` 或 `stitch` |
 | `DOWNLOAD_TIMEOUT` | `1800` | 下载超时秒数 |

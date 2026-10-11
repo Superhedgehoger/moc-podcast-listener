@@ -2,6 +2,20 @@
 
 [简体中文](README.zh-CN.md) | [English](README.en.md)
 
+## v4.17.0: Small-Context Summaries / 小上下文总结
+
+New transcription results carry `summary_workflow_version=1`. The main session
+coordinates disk-backed `prepare/status/start/fail/assemble` tasks; independent
+host workers (`sessions_spawn` or equivalent) use the current model at concurrency
+2. No whole transcript is loaded into the main session. Keep the quick overview
+and all detailed report sections; Show Notes remain archival, not summary evidence.
+
+新版本保留详细报告、个人笔记和默认音频保留行为。旧结果无版本字段时继续兼容，
+不会自动重做历史报告；新结果装配后须通过 `--verify ... --require-report`，
+其中额外调用 `validate_workflow` 核验磁盘证据链。
+升级和恢复步骤见 [小上下文工作流 / Workflow](references/low-context-workflow.md)。
+模拟测试不等于真实模型验证：fixture/simulated checks are not live host/model runs.
+
 A local-first podcast and course workflow for media resolution, audio-only
 transcription, timestamped transcripts, and durable source archiving.
 

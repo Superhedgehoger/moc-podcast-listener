@@ -4,7 +4,7 @@
 
 ## Overview
 
-> Version: v4.16.0
+> Version: v4.17.0
 
 MOC Podcast Listener is a practical, local-first skill for turning podcast
 episodes and course lessons into durable research material. It resolves media, prefers an
@@ -16,8 +16,9 @@ rebuildable exports for common PKM tools.
 
 For YouTube and Bilibili, the skill selects an audio-only stream instead of
 downloading video. It also accepts local course audio and video files; local
-video is reduced to its first audio track before ASR, and temporary audio is
-deleted after completion unless explicitly retained. Process multi-lesson
+video is reduced to its first audio track before ASR. Downloaded/extracted audio
+and WAV files are kept by default; `KEEP_AUDIO=0` requests cleanup of files created
+by the run, while `--keep-audio` overrides cleanup. Process multi-lesson
 courses one lesson per task for independent retries, transcripts, and reports.
 
 Podcast audio is difficult to search and quote, while images and links in Show
@@ -45,6 +46,87 @@ The scripts perform deterministic operations:
 
 The final summary links to the independent transcript instead of embedding a
 second copy of the complete text.
+
+## v4.17.0 Small-Context Workflow and Upgrade
+
+Every new transcription result carries `summary_workflow_version=1`, regardless
+of transcript length. The main session coordinates files and compact status; it
+never loads the whole transcript or all extracted evidence. The host launches
+independent workers through `sessions_spawn` or an equivalent mechanism, using
+the current model with at most two workers running. Python does not call a model
+API. A host without independent workers must report the blocker, not fall back
+to whole-transcript synthesis in the main session.
+
+```bash
+python3 podcast-summary.py prepare "RESULT_JSON"
+python3 podcast-summary.py status "RESULT_JSON"
+python3 podcast-summary.py start "RESULT_JSON" --task "TASK_ID"
+# Dispatch the worker in the host; then run status again.
+# Only for a failed worker confirmed stopped:
+python3 podcast-summary.py fail "RESULT_JSON" --task "TASK_ID" --reason "worker failed"
+# Only after status reports ready_to_assemble:
+python3 podcast-summary.py assemble "RESULT_JSON"
+python3 podcast-listener.py --verify "RESULT_JSON" --require-report
+```
+
+Use the absolute job result path for `RESULT_JSON`. Tasks and evidence live in
+the episode package's `总结过程/` directory. Bounded extraction and hierarchical
+reduction feed one independent writer. The quick overview remains in `内容摘要`;
+all nine detailed sections and their coverage floors remain required. Show Notes
+are assembled as archival material, never used as summary evidence. Personal
+notes remain protected.
+
+An optional [bounded OpenClaw adapter](scripts/openclaw_summary_worker.py)
+selects exact source locations instead of copying quotations, then writes each
+report section, knowledge, and coverage batch in separate isolated sessions.
+Validated sections are reused by request hash inside the episode package.
+Start the task first, then pass its `task.json` and the exact current model.
+The same validators and three-start ceiling apply. This adapter remains
+experimental: passing individual chunks does not verify whole-episode quality.
+Live testing also found semantic errors despite mechanical verification. Opted-in
+new writer inputs require a current independent audit. Short reference nodes
+keep transitive original evidence IDs in a hash-checked local registry instead
+of repeating them in model context. Source coverage and artifact grounding are
+reviewed separately, so calls add source batches and artifact shards rather than
+crossing every pair. Each call remains bounded, keeps original parent timestamps,
+and resumes hash-bound progress. New v5 reviews request bounded source recovery
+when supplied candidates are insufficient, rather than declaring a factual error.
+At most two lookups share the existing three-call budget; no counters reset.
+Protocol retries receive concrete untrusted diagnostics, and valid negative
+judgments are durably retained, including across storage failures. Processing
+coverage is not a measure of factual accuracy.
+Long-source audits still need full live validation and cost measurements; see the
+[validation record](VALIDATION-v4.17.0.md).
+New adapter body parts use plain Markdown and persistent three-call limits per
+part, preserving valid caches across parent retries. Exhausted extraction/reduction
+tasks can be explicitly split with `podcast-summary.py refine RESULT_JSON --task TASK_ID`
+while all workers are stopped. Smaller children retain source provenance; the
+failed parent's counters and full snapshot remain on disk. This is not a retry reset.
+Review jobs also retain separate three-call protocol limits. Valid negative
+judgments require artifact repair and are never rerun unchanged to fish for a pass.
+Long-draft coverage retrieves complete related passages instead of repeating the
+entire body in every request. Full-source auditing still checks coverage and fidelity;
+retrieval alone is not proof. A one-time explicit migration handles only the old
+coverage-size blocker while preserving caches, attempts and negative review records.
+Source-coverage batches now reserve complete adjacent originals before optional
+body passages. Divisible artifact items are split at complete sentences when the
+full serialized grounding prompt exceeds its budget, even if each component fits.
+These planning regressions pass offline; they do not claim live report acceptance.
+Artifact-only verification cannot complete a job:
+`--require-report` is mandatory for that transition.
+
+Upgrade the scripts and references together. New opted-in results require
+`validate_workflow` during final report verification. Older results without the
+field keep existing verification and need no workflow state, retranscription or
+automatic migration. Back up an old result/report/knowledge before explicitly
+opting it in and rerunning the full workflow. See the
+[workflow reference](references/low-context-workflow.md) for budgets, recovery
+and retry limits. `assembled` is not `completed`; final verification must pass.
+
+Validation reports must distinguish simulated/fixture checks from live host/model
+runs. Mocked or scripted worker artifacts can test state and validation mechanics
+but do not demonstrate actual independent-model execution or summary quality.
+Do not claim live end-to-end validation without an actual worker run.
 
 ## Supported Sources
 

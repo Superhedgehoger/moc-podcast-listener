@@ -229,6 +229,52 @@ class LinearReviewRegressions(unittest.TestCase):
         self.assertTrue(all(linear._size(item) <= linear.ARTIFACT_BUDGET for item in plan["artifacts"]))
         self.assertGreater(len([item for item in plan["artifacts"] if item["kind"] == "body"]), 1)
 
+    def test_coverage_reserves_adjacent_sources_before_optional_body(self):
+        segments = [{"start": i, "end": i + 1,
+                     "text": f"Topic{i} needs consent. " + "context " * 75}
+                    for i in range(24)]
+        body = "## Summary\n\n" + "\n\n".join(
+            f"Topic{i} needs consent. " + "optional detail " * 120 + "." for i in range(24))
+        plan = self.plan(segments, body)
+        self.assert_bounds_and_coverage(plan, segments, body)
+        jobs = [job for job in plan["jobs"] if job["kind"] == "coverage"]
+        self.assertGreater(len(jobs), 1)
+        for job in jobs:
+            data = self.data(job)
+            primary = [int(unit["id"][1:]) for unit in data["primary_source"]]
+            context = {int(unit["id"][1:]) for unit in data["context_source"]}
+            for adjacent in (primary[0] - 1, primary[-1] + 1):
+                if 0 <= adjacent < len(plan["units"]):
+                    self.assertIn(adjacent, context,
+                                  "Optional passages must not displace complete adjacent originals")
+
+    def test_divisible_atom_checks_serialized_grounding_prompt_before_admission(self):
+        segments = [{"start": i, "end": i + 1,
+                     "text": f"Topic{name} " + '"' * 3700 + "."}
+                    for i, name in enumerate(("A", "B"))]
+        claims = ["TopicA " + "a" * 4200 + ".", "TopicB " + "b" * 4200 + "."]
+        body = "## Summary\n\n" + " ".join(claims)
+        atom = review._body_atoms(body, ["Summary", "knowledge"], {})[-1]
+        self.assertLess(linear._size({**atom, "artifact_id": "a1"}), linear.ARTIFACT_BUDGET)
+        self.assertLess(len("\n".join(s["text"] for s in segments).encode()), linear.SOURCE_BUDGET)
+        plan = self.plan(segments, body)
+        self.assert_bounds_and_coverage(plan, segments, body)
+        body_atoms = [atom for atom in plan["artifacts"] if atom["kind"] == "body"]
+        for claim in claims:
+            self.assertTrue(any(claim in atom["text"] for atom in body_atoms))
+        self.assertFalse(any(all(claim in atom["text"] for claim in claims) for atom in body_atoms))
+
+    def test_indivisible_source_still_audited_when_adjacent_context_cannot_fit(self):
+        segments = [{"start": 0, "end": 1, "text": "x" * 7900 + "."},
+                    {"start": 1, "end": 2, "text": "y" * 7900 + "."}]
+        body = "## Summary\n\n" + segments[0]["text"] + "\n\n" + segments[1]["text"]
+        plan = self.plan(segments, body)
+        self.assert_bounds_and_coverage(plan, segments, body)
+        for job in plan["jobs"]:
+            if job["kind"] == "coverage":
+                self.assertEqual(len(self.data(job)["primary_source"]), 1)
+                self.assertEqual(self.data(job)["context_source"], [])
+
     def setup_review(self):
         self.task = {"kind": "write", "input_hash": "synthetic-input", "attempts": 1,
                      "input": str(self.root / "input.json"), "output": str(self.root / "output.json")}

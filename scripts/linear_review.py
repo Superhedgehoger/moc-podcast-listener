@@ -7,7 +7,7 @@ import re
 from collections import Counter
 
 CONTRACT = "linear_source_grounding_v4"
-PLANNER_VERSION = "speaker_source_aware_shards_v2"
+PLANNER_VERSION = "context_reserved_shards_v3"
 BUDGET = 23000
 SOURCE_BUDGET = 8000
 ARTIFACT_BUDGET = 9500
@@ -141,12 +141,19 @@ def plan(payload, body, knowledge, parts, part_texts=None):
                 matches.append(max(range(len(scores)), key=scores.__getitem__))
         return sorted(set(matches))
 
+    def artifact_prompt(items, indexes, shard_id):
+        shard = {"shard_id": shard_id, "kind": items[0]["kind"], "items": items}
+        names = list(dict.fromkeys(name for atom in items for name in atom["part_names"]))
+        return _prompt("grounding", {"retrieved_source": source_view(indexes),
+                                    "artifact_shard": shard, "allowed_parts": names})
+
     atoms, required_sources = [], {}
 
     def admit(atom):
         atom = {**atom, "artifact_id": f"a{len(atoms)}"}
         needed = first_sources(atom)
-        if _size(atom) > ARTIFACT_BUDGET or not source_fits(needed):
+        if (_size(atom) > ARTIFACT_BUDGET or not source_fits(needed)
+                or not _fits(artifact_prompt([atom], needed, "artifact-0000"))):
             sentences = legacy._sentences(atom["text"]) if atom["kind"] == "body" else []
             if len(sentences) <= 1:
                 raise ValueError("Semantic audit blocked: unfit indivisible artifact/source grounding pair; realign complete boundaries")
@@ -173,16 +180,23 @@ def plan(payload, body, knowledge, parts, part_texts=None):
     def required(items):
         return sorted({i for atom in items for i in required_sources[atom["artifact_id"]]})
 
-    def artifact_prompt(items, indexes, shard_id):
-        shard = {"shard_id": shard_id, "kind": items[0]["kind"], "items": items}
-        names = list(dict.fromkeys(name for atom in items for name in atom["part_names"]))
-        return _prompt("grounding", {"retrieved_source": source_view(indexes),
-                                    "artifact_shard": shard, "allowed_parts": names})
-
     def coverage_prompt(primary, context, passages):
         return _prompt("coverage", {"primary_source": source_view(primary),
                                    "context_source": source_view(context),
                                    "retrieved_body": passages, "allowed_parts": body_parts})
+
+    def coverage_context(primary):
+        # Adjacent originals precede optional body retrieval in both budgets.
+        return [i for i in dict.fromkeys([primary[0] - 1, primary[-1] + 1, 0])
+                if 0 <= i < len(units) and i not in primary]
+
+    def reserved_context(primary, passages):
+        context = []
+        for i in coverage_context(primary):
+            candidate = sorted(context + [i])
+            if source_fits(primary + candidate) and _fits(coverage_prompt(primary, candidate, passages)):
+                context = candidate
+        return context
 
     # Reserve each sentence's best complete body candidate, not just one passage.
     batches, start = [], 0
@@ -193,6 +207,10 @@ def plan(payload, body, knowledge, parts, part_texts=None):
             passages = [body_atoms[i] for i in required_body(candidate)]
             if not source_fits(candidate) or not _fits(coverage_prompt(candidate, [], passages)):
                 break
+            context = coverage_context(candidate)
+            if primary and (not source_fits(candidate + context)
+                            or not _fits(coverage_prompt(candidate, context, passages))):
+                break
             primary = candidate
         if not primary:
             raise ValueError("Semantic audit blocked: unfit indivisible source/artifact pair")
@@ -202,22 +220,16 @@ def plan(payload, body, knowledge, parts, part_texts=None):
     jobs = []
     for batch_index, primary in enumerate(batches):
         selected = required_body(primary)
+        context = reserved_context(primary, [body_atoms[i] for i in selected])
         for i in _rank([source_terms[j] for j in primary], body_terms):
             if i in selected:
                 continue
             candidate = sorted(selected + [i])
-            if _fits(coverage_prompt(primary, [], [body_atoms[j] for j in candidate])):
+            if _fits(coverage_prompt(primary, context, [body_atoms[j] for j in candidate])):
                 selected = candidate
         if not selected:
             raise ValueError("Semantic audit blocked: no complete body passage fits source coverage")
         passages = [body_atoms[i] for i in selected]
-        context = []
-        for i in dict.fromkeys([0, primary[0] - 1, primary[-1] + 1]):
-            if i < 0 or i >= len(units) or i in primary:
-                continue
-            candidate = sorted(context + [i])
-            if source_fits(primary + candidate) and _fits(coverage_prompt(primary, candidate, passages)):
-                context = candidate
         jobs.append({"job_id": f"coverage/source-{batch_index:04d}", "kind": "coverage",
                      "prompt": coverage_prompt(primary, context, passages), "parts": body_parts[:],
                      "primary_source_ids": [units[i]["source_id"] for i in primary],

@@ -74,6 +74,15 @@ Recent OpenClaw versions use per-model `models.providers.<provider>.models[].con
 
 ## Recovery / 恢复
 
+Source-coverage planning reserves complete adjacent original sentences before adding
+optional report passages. When necessary it makes smaller primary batches rather
+than filling the prompt with body text and losing attribution context. An
+indivisible source unit still receives its own bounded audit if adjacent context
+cannot fit; missing context is not permission to infer speaker identity or pass.
+
+原文覆盖审核先预留完整相邻原句，再填充可选正文候选；必要时缩小主要原文批次。
+不可分原句仍独立受审，上下文放不下时不能猜测人物归属或宣称通过。
+
 New writer inputs use `coverage_worker_contract=scoped_body_coverage_v2`.
 Coverage planning selects complete relevant body paragraphs locally, reserves each
 claim's best passage and packs contiguous evidence batches within 23K bytes.

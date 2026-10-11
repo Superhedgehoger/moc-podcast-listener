@@ -1,5 +1,15 @@
 # v4.17.0 验证记录 / Validation Record
 
+## 2026-10-11 预算复查与继续验证
+
+最新代码 **287 项离线测试通过**，Skill 格式、Python 编译及 Git 空白检查通过；独立只读代码复查没有剩余实质问题。新增修复：原文覆盖批次先预留相邻原句，再填充可选正文；完整 grounding 请求的 JSON 序列化开销也在稿件入队时检查，可分内容按完整句拆分，真正不可分内容仍拒绝。
+
+访谈草稿本地重新规划：27 个覆盖批次均保留上下文，1101 个原句恰好覆盖一次，最大完整提示为 22999 UTF-8 字节；旧规划 26 批次中 22 个没有上下文。这是本地规划检查，不是新审核规划的真实模型通过。正在执行的访谈审核仍使用进程先前载入的旧规划，不能据其结果宣称新修复已实测。
+
+本轮草稿引述独立机械核对：访谈 11/11、短样本 5/5 与逐字原文及四舍五入的父片段起始时间匹配；不证明说话人身份、总结语义或主题完整性。长学习样本已通过 83/86 个提取任务，覆盖 6122/6303 个原始片段；后续模型调用仍仅使用授权 Agnes，未重新转录。
+
+English: 287 offline tests pass, with independent read-only code review. Source context is reserved before optional body retrieval, and full serialized grounding requests are checked before admitting divisible artifacts. Local replanning covers all 1101 interview source units in 27 context-bearing batches, within 22999 bytes. This is not live acceptance of the new planner; the already-running review retains its previously loaded implementation. Exact-text/parent-time checks pass for 11 interview and five short-draft quotations. Live episode acceptance, formal-course and 256K tests remain incomplete; main and the installed Skill stay unchanged.
+
 ## 2026-10-11 Agnes 专项修复与续测（当前状态）
 
 最新检查点：**284 项离线测试通过。** 访谈旧写作任务因将约 75K 字节正文重复放进 23K 上限的覆盖请求，三次后 blocked。新增完整段落检索式覆盖与一次性显式协议迁移；旧三次记录、全部合格证据/正文缓存、每部分次数及相同提示的否定审稿意见保留，不重启无关语义失败。两项新的 Agnes 覆盖请求已经实际通过，处理全部 40 个证据编号，输入为 22895 / 17447 UTF-8 字节，全文未删短。后续独立原文审稿正在运行，已有通过和否定意见，尚未整集验收。

@@ -104,6 +104,10 @@ Long-draft coverage retrieves complete related passages instead of repeating the
 entire body in every request. Full-source auditing still checks coverage and fidelity;
 retrieval alone is not proof. A one-time explicit migration handles only the old
 coverage-size blocker while preserving caches, attempts and negative review records.
+Source-coverage batches now reserve complete adjacent originals before optional
+body passages. Divisible artifact items are split at complete sentences when the
+full serialized grounding prompt exceeds its budget, even if each component fits.
+These planning regressions pass offline; they do not claim live report acceptance.
 Artifact-only verification cannot complete a job:
 `--require-report` is mandatory for that transition.
 

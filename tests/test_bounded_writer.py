@@ -88,7 +88,7 @@ class BoundedWriterTests(unittest.TestCase):
                 self.assertEqual(request["name"], writer.QUOTE_SECTION)
                 continue
             self.assertEqual(request["estimated_bytes"], len(request["prompt"].encode("utf-8")))
-            self.assertLessEqual(request["estimated_bytes"], 24000)
+            self.assertLessEqual(request["estimated_bytes"], writer.REQUEST_BUDGET)
             self.assertIn("untrusted source data", request["prompt"])
             self.assertNotIn("DO_NOT_READ", request["prompt"])
             self.assertNotIn("original evidence", request["prompt"])
@@ -155,7 +155,7 @@ class BoundedWriterTests(unittest.TestCase):
     def test_over_budget_unicode_fails_without_truncation(self):
         self.payload["entries"][0]["evidence"]["items"][0]["details"] = "证" * 8000
         before = copy.deepcopy(self.payload)
-        with self.assertRaisesRegex(ValueError, "exceeds 23000 UTF-8 bytes.*no evidence was truncated"):
+        with self.assertRaisesRegex(ValueError, "exceeds 22000 UTF-8 bytes.*no evidence was truncated"):
             writer.plan(self.payload, self.sources)
         self.assertEqual(self.payload, before)
 
@@ -226,7 +226,7 @@ class BoundedWriterTests(unittest.TestCase):
         self.assertEqual(requests, again)
         for request in requests:
             data = json.loads(request["prompt"].split("\nINPUT DATA:\n")[1])
-            self.assertLessEqual(request["estimated_bytes"], 24000)
+            self.assertLessEqual(request["estimated_bytes"], writer.REQUEST_BUDGET)
             self.assertEqual(set(data["sections"]), set(self.payload["section_minimums"]))
             self.assertEqual(data["sections"]["详细总结"], sections["详细总结"])
             self.assertEqual([key for item in data["claims"] for key in item["evidence_ids"]], request["leaf_ids"])
@@ -289,7 +289,7 @@ class BoundedWriterTests(unittest.TestCase):
             quote["evidence_id"] = key
         self.assertGreater(len(json.dumps(self.sources["boundaries"]).encode()), 24000)
         before = copy.deepcopy((self.payload, self.sources))
-        with self.assertRaisesRegex(ValueError, "request 'knowledge' exceeds 23000 UTF-8 bytes"):
+        with self.assertRaisesRegex(ValueError, "request 'knowledge' exceeds 22000 UTF-8 bytes"):
             writer.plan(self.payload, self.sources)
         self.assertEqual((self.payload, self.sources), before)
 

@@ -1,5 +1,10 @@
 # 播客代听助手
 
+试用更新：独立写作 worker 可用 `--max-dispatches` 和 `--max-seconds` 分段运行，
+以退出码 75 保存暂停检查点；`--preflight-only` 只读预检正文预算及手动提供的主机
+开销。继续时保留缓存与重试台账，不再 start/fail。不是自动限流器或后台调度服务，
+整集验收仍待完成。详见[小上下文工作流](references/low-context-workflow.md)。
+
 **简体中文** | [English](README.en.md) | [多语言首页](README.md)
 
 > 版本：v4.17.0

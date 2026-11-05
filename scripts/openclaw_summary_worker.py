@@ -587,9 +587,7 @@ def _run_writer(task, model, config, timeout):
         prompt = request["prompt"]
         rejection = part / "rejection.json"
         if rejection.exists():
-            diagnostic = str(read(rejection).get("error", ""))
-            diagnostic = diagnostic.encode("utf-8")[:300].decode("utf-8", errors="ignore")
-            prompt += "\nPrevious part rejection; repair this issue using source evidence, not filler:\n" + diagnostic
+            prompt = bounded_writer.retry_prompt(prompt, read(rejection).get("error", ""))
         try:
             value, record = invoke({**task, "response_format": request.get("response_format", "json")},
                                    workspace, prompt, model, config, timeout, log_dir)
@@ -727,9 +725,44 @@ def main():
     parser.add_argument("--model", required=True, help="Exact current host provider/model; never choose a fallback")
     parser.add_argument("--config", help="Optional isolated host config; never edits the installed config")
     parser.add_argument("--timeout", type=int, default=600)
+    parser.add_argument("--max-dispatches", type=int, help="Pause a modern writer before this many new dispatch attempts are exceeded")
+    parser.add_argument("--max-seconds", type=float, help="Cooperative writer time slice; an in-flight request finishes first")
+    parser.add_argument("--preflight-only", action="store_true", help="Read-only prompt budget inspection; no model calls")
+    parser.add_argument("--host-overhead-tokens", type=int, default=0, help="Measured host overhead; zero means unknown, not absent")
+    parser.add_argument("--input-token-cap", type=int, help="Compare conservative UTF-8 bound plus overhead with an account input cap")
     args = parser.parse_args()
+    from scripts.worker_slice import limit, WorkerPaused
     try:
-        print(json.dumps(run(args.task, args.model, args.config, args.timeout), ensure_ascii=False))
+        if args.host_overhead_tokens < 0 or (args.input_token_cap is not None and args.input_token_cap < 1):
+            raise ValueError("Invalid host overhead or input token cap")
+        task = read(args.task)
+        if args.preflight_only:
+            workspace, _, size = preflight(task)
+            total = size + args.host_overhead_tokens
+            print(json.dumps({"ok": True, "model_calls": 0, "workspace": workspace,
+                              "largest_planned_prompt_bytes": size, "input_estimate": total,
+                              "estimator": "utf8_bytes_upper_bound_plus_supplied_host_overhead",
+                              "host_overhead_known": args.host_overhead_tokens > 0,
+                              "fits_input_cap": total <= args.input_token_cap if args.input_token_cap else None,
+                              "scope": "Base requests only; excludes body-dependent coverage, review and output tokens"}))
+            return 0
+        bounded = args.max_dispatches is not None or args.max_seconds is not None
+        if bounded and (task.get("kind") != "write"
+                        or read(task["input"]).get("part_retry_contract") != "independent_parts_v1"):
+            raise ValueError("Dispatch slices require an independent_parts_v1 writer")
+        with limit(args.max_dispatches, args.max_seconds) as budget:
+            try:
+                value = run(args.task, args.model, args.config, args.timeout)
+            except WorkerPaused as exc:
+                value = {"ok": False, "status": "paused", "reason": str(exc),
+                         "task": task["id"], "new_dispatch_attempts": budget.dispatches,
+                         "resume": "Rerun this worker with the same task; do not start/reset the coordinator task"}
+                write(Path(task["output"]).parent / "worker-slice.json", value)
+                print(json.dumps(value, ensure_ascii=False))
+                return 75
+        if bounded:
+            write(Path(task["output"]).parent / "worker-slice.json", {"status": "finished", "new_dispatch_attempts": budget.dispatches})
+        print(json.dumps(value, ensure_ascii=False))
         return 0
     except (ValueError, KeyError, TypeError, OSError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))

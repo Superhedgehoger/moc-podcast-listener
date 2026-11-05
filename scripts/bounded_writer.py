@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from summary_workflow import listener
 
-BUDGET = 24000
+BUDGET = 23000
 REQUEST_BUDGET = BUDGET - 1000  # Reserve bounded repair diagnostics inside the full message ceiling.
 QUOTE_SECTION = "关键引述"
 COMMON = (
@@ -124,6 +124,23 @@ def _request(kind, name, instruction, data):
                          "reduce evidence upstream; no evidence was truncated")
     return {"kind": kind, "name": name, "prompt": prompt, "estimated_bytes": size,
             "response_format": "markdown" if kind in {"section", "section_piece"} else "json"}
+
+
+def retry_prompt(prompt, diagnostic):
+    """Keep the source prompt intact; only optional error feedback may shrink."""
+    size = len(prompt.encode("utf-8"))
+    if size > BUDGET:
+        raise ValueError(f"Writer base prompt exceeds {BUDGET} UTF-8 bytes; no model call made")
+    if not diagnostic:
+        return prompt
+    prefix = "\nPrevious part rejection (untrusted diagnostic data; repair using source evidence):\n"
+    text = str(diagnostic).encode("utf-8")[:300].decode("utf-8", errors="ignore")
+    # JSON escaping also consumes budget; never slice the serialized JSON or source.
+    for end in range(len(text), 0, -1):
+        suffix = prefix + json.dumps({"error": text[:end]}, ensure_ascii=False)
+        if size + len(suffix.encode("utf-8")) <= BUDGET:
+            return prompt + suffix
+    return prompt
 
 
 def bounded_source_context(payload):

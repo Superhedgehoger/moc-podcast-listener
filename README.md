@@ -4,6 +4,10 @@
 
 ## v4.17.0: Small-Context Summaries / 小上下文总结
 
+Trial writers now support resumable `--max-dispatches` / `--max-seconds` slices
+and read-only `--preflight-only` inspection. 暂停保留缓存和失败台账，不代表报告完成。
+See [workflow details](references/low-context-workflow.md); full-episode release acceptance is still pending.
+
 New transcription results carry `summary_workflow_version=1`. The main session
 coordinates disk-backed `prepare/status/start/fail/assemble` tasks; independent
 host workers (`sessions_spawn` or equivalent) use the current model at concurrency

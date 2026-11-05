@@ -1,5 +1,11 @@
 # MOC Podcast Listener
 
+Trial update: independent writers support resumable `--max-dispatches` and
+`--max-seconds` slices (exit 75), preserving caches and retry ledgers. Read-only
+`--preflight-only` reports base-prompt budgets plus user-supplied host overhead.
+This is not automatic quota throttling or a persistent scheduler; full-episode
+acceptance remains pending. See the [workflow](references/low-context-workflow.md).
+
 [Home](README.md) | [简体中文](README.zh-CN.md) | **English**
 
 ## Overview

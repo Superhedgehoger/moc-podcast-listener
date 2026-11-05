@@ -46,6 +46,37 @@ For a host that cannot give spawned sessions the required working root, an isola
 
 ### Optional Bounded Adapter / 可选分任务适配器
 
+Modern writers (`part_retry_contract=independent_parts_v1`) support bounded runs:
+
+```bash
+python3 scripts/openclaw_summary_worker.py TASK_JSON --model CURRENT_MODEL --preflight-only --host-overhead-tokens 10000 --input-token-cap 8000
+python3 scripts/openclaw_summary_worker.py TASK_JSON --model CURRENT_MODEL --max-dispatches 2 --max-seconds 300
+```
+
+Preflight is read-only and advisory: replace example limits with measurements and
+account limits. `fits_input_cap=false` means do not dispatch at that size. UTF-8
+estimates are conservative, not tokenizer counts; zero overhead means unknown.
+This covers base requests only, not future body-dependent coverage, review or
+output tokens. It is not automatic TPM throttling or account-quota discovery.
+
+Slice limits are checked before each new independent attempt, including review
+retries; cache hits cost no dispatch allowance. Exit **75**, `status=paused` and
+`worker-slice.json` indicate a checkpoint, not a content failure. After the worker
+process exits, rerun the same task without another coordinator `start` or `fail`.
+Failed attempts retain their three-attempt limit across slices; exhausted or
+unresolved ledgers remain blocked. Legacy tasks reject slice options explicitly.
+
+Time limits are cooperative: an in-flight request finishes under its own timeout
+before the next checkpoint. Dispatch attempts can fail preflight without a model
+call, so this counter is not billed requests. Defaults are unchanged without slice
+options. No scheduler, automatic continuation or notifications are installed. The
+coordinator must actually dispatch the next slice or report a pause; a stale
+`running` field is not proof of a live process.
+
+中文：退出码 75 是可恢复暂停；保留 task.json、缓存及失败次数，确认上次进程退出
+后继续同一个 worker，不再 start/fail，不清零。限时不是强杀当前请求，主机开销和
+账户 token 配额仍需单独实测。示例中的 10000 / 8000 不是默认账户配额。
+
 Detailed writing can use several contiguous evidence groups and then validate the complete section against the unchanged floor. Each extraction chunk is capped at 96 complete primary segments in addition to its unchanged 8K input estimate. The byte/token budget, not the segment count, usually determines the boundary; this avoids excessive tiny tasks on sentence-level transcripts. New evidence uses a 6K structured-content limit and an 8K complete-file limit, including quotations and provenance. This is distinct from the previous 6K whole-file limit. A budget-only migration preserves attempts and may locally recover an existing source-valid artifact after revalidation; it does not fabricate a new model success.
 
 Mechanical checks do not establish semantic fidelity. A hash-bound `semantic-review.json` rejection invalidates the corresponding artifacts. New writer inputs set `semantic_review_required`; a current passed independent audit is mandatory before completion. The bounded adapter performs this audit automatically in fresh tool-free sessions using an explicit private config. A native worker without that audit capability must stop pending, never fabricate a passed audit file. Review source attribution, examples, qualifications and omitted major mechanisms independently; do not accept coverage IDs alone as proof. Source-absent compound names require review. Arbitrarily long courses remain unvalidated.
@@ -169,6 +200,20 @@ New results opt into final `validate_workflow` via `summary_workflow_version=1` 
 Retain source audio and WAV by default. Use `KEEP_AUDIO=0` only with explicit user authorization. Cleanup of a previous run is limited to uniquely identified audio from that same episode after replacement transcription succeeds; never delete other episodes or the last usable source before a retry succeeds.
 
 ## Validation Claims / 验证声明
+
+Writer planning reserves 1000 bytes inside the adapter's unchanged 23000-byte
+dispatch ceiling: base requests are at most 22000 UTF-8 bytes. Optional part-retry
+diagnostics are JSON-escaped and bounded against the remaining space; source
+prompts are never truncated. Legacy near-ceiling requests may omit optional
+diagnostics when no complete feedback envelope fits. This does not reset attempts
+or make an exhausted task eligible for another call. Keep historical ledgers when
+upgrading; a corrected planner is not a completed report.
+
+免费 API 的上下文窗口、每分钟 token 配额、每日配额与后台进程超时是不同限制。
+先核对实际账户配额及主机系统提示开销，再决定并发和块大小；默认并发 2 不是
+服务商限流许可。限流应等待明确冷却时间或保存暂停状态，不把 429 当成三次
+内容错误反复生成。401/403 应停下修复认证；不得轮换密钥规避组织配额。
+原始 HTTP 响应不可用时，不把主机报错或粗略字节估计当作真实限流诊断。
 
 Fixture tests, mocked worker outputs and scripted/simulated evidence flows verify mechanics only. **Simulated is not live**: they do not show that a host actually started isolated current-model workers or that those workers produced a faithful detailed report. Label validation as simulated or live. A live claim requires an actual host dispatch, worker-produced artifacts, assembly and successful final verification; disclose host/model, concurrency and any untested source types. Do not infer live quality from a passing schema/coverage check.
 

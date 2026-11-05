@@ -3,6 +3,7 @@ import time
 from pathlib import Path
 
 from summary_workflow import digest, read, write
+from scripts.worker_slice import checkpoint
 
 
 def inherited_part_attempts(directory, binding, previous_bindings):
@@ -41,6 +42,7 @@ def bounded_part_attempts(directory, binding, execute, previous_attempts=None):
     if previous_attempts and not path.exists():
         write(path, ledger)
     for index in range(len(rows), 3):
+        checkpoint()  # Pause before allocating a durable attempt, not after it.
         row = {"attempt": index + 1, "status": "running", "started_at": time.time()}
         rows.append(row)
         write(path, ledger)

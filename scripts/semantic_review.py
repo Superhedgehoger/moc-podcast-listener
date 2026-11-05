@@ -867,6 +867,11 @@ def run_review(task, payload, model, config, timeout, invoke, requests):
         audit.update(status="passed", reason="All planned source coverage and artifact grounding jobs passed; "
                      "the host processing-coverage ledger is complete, not a factual-accuracy score")
     except (ValueError, OSError, KeyError, TypeError) as exc:
+        from scripts.worker_slice import WorkerPaused
+        if isinstance(exc, WorkerPaused):
+            audit["status"] = "pending"
+            audit["reason"] = str(exc)
+            raise
         if audit["status"] != "needs_source":
             audit["status"] = "failed"
         audit["reason"] = str(exc)

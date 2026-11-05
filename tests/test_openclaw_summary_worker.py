@@ -1,5 +1,7 @@
 """Adapter contracts only; these tests do not invoke a model."""
 import importlib.util
+from contextlib import redirect_stdout
+import io
 import json
 import stat
 from pathlib import Path
@@ -15,6 +17,81 @@ spec.loader.exec_module(worker)
 
 
 class WorkerAdapterTests(unittest.TestCase):
+    def test_cli_slice_pauses_after_cached_part_without_allocating_next_attempt(self):
+        from scripts import bounded_writer
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            task_path = self.running_writer_task(path, required=False)
+            worker.write(path / "input.json", {"part_retry_contract": "independent_parts_v1"})
+            config = path / "private.json"
+            worker.write(config, {"tools": {"deny": ["*"]}})
+            requests = [{"kind": "section", "name": name, "prompt": name}
+                        for name in ("内容摘要", "内容大纲")]
+            output = io.StringIO()
+            with patch.object(worker, "writer_sources", return_value={}), \
+                    patch.object(bounded_writer, "plan", return_value=requests), \
+                    patch.object(bounded_writer, "validate_section", return_value="fixture prose"), \
+                    patch.object(worker, "invoke", return_value=({"text": "fixture prose"}, {"sessionId": "fixture"})) as invoke, \
+                    patch.object(worker.sys, "argv", ["worker", str(task_path), "--model", "fixture/exact", "--config", str(config), "--max-dispatches", "1"]), \
+                    redirect_stdout(output):
+                self.assertEqual(worker.main(), 75)
+            self.assertEqual(invoke.call_count, 1)
+            self.assertEqual(json.loads(output.getvalue())["status"], "paused")
+            self.assertEqual(worker.read(path / "worker-slice.json")["new_dispatch_attempts"], 1)
+            caches = list((path / "parts").glob("*/validated.json"))
+            ledgers = list((path / "parts").glob("*/dispatch-ledgers/*.json"))
+            self.assertEqual(len(caches), 1)
+            self.assertEqual(len(ledgers), 1)
+            self.assertEqual(worker.read(ledgers[0])["attempts"][0]["status"], "passed")
+            self.assertEqual(worker.read(task_path)["attempts"], 1)
+
+    def test_preflight_cli_never_starts_model_or_changes_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            task_path = self.running_writer_task(path, required=False)
+            before = task_path.read_bytes()
+            output = io.StringIO()
+            with patch.object(worker, "preflight", return_value=(str(path), "source", 1000)), \
+                    patch.object(worker, "run") as run, \
+                    patch.object(worker.sys, "argv", ["worker", str(task_path), "--model", "fixture/exact", "--preflight-only", "--host-overhead-tokens", "10000", "--input-token-cap", "8000"]), \
+                    redirect_stdout(output):
+                self.assertEqual(worker.main(), 0)
+            run.assert_not_called()
+            value = json.loads(output.getvalue())
+            self.assertEqual(value["input_estimate"], 11000)
+            self.assertFalse(value["fits_input_cap"])
+            self.assertEqual(task_path.read_bytes(), before)
+
+    def test_legacy_writer_retry_feedback_stays_under_dispatch_ceiling(self):
+        from scripts import bounded_writer
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            task_path = self.running_writer_task(path, required=False)
+            worker.write(path / "input.json", {"part_retry_contract": "independent_parts_v1"})
+            config = path / "private.json"
+            worker.write(config, {"tools": {"deny": ["*"]}})
+            request = {"kind": "section", "name": "内容摘要", "prompt": "e" * 22950,
+                       "response_format": "markdown"}
+            prompts = []
+
+            def invoke(*args):
+                prompts.append(args[2])
+                if len(prompts) == 1:
+                    raise ValueError("Invalid model JSON")
+                raise RuntimeError("stop synthetic dispatch")
+
+            with patch.object(worker, "writer_sources", return_value={}), \
+                    patch.object(bounded_writer, "plan", return_value=[request]), \
+                    patch.object(worker, "invoke", side_effect=invoke):
+                with self.assertRaisesRegex(RuntimeError, "stop synthetic"):
+                    worker._run_writer(worker.read(task_path), "fixture/exact", str(config), 30)
+            self.assertEqual(len(prompts), 2)
+            self.assertTrue(all(value == request["prompt"] for value in prompts))
+            ledger = list((path / "parts").glob("*/dispatch-ledgers/*.json"))
+            self.assertEqual(len(ledger), 1)
+            self.assertEqual(len(worker.read(ledger[0])["attempts"]), 2)
+            self.assertEqual(worker.read(ledger[0])["attempts"][0]["status"], "failed")
+
     def running_writer_task(self, path, required=True):
         worker.write(path / "input.json", {"semantic_review_required": required})
         task = {"id": "write", "kind": "write", "status": "running", "attempts": 1,

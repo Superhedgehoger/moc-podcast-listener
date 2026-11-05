@@ -1,5 +1,47 @@
 # v4.17.0 验证记录 / Validation Record
 
+## 2026-11-05 有界运行与预检（离线）
+
+新增可选 writer 调度次数/时间片，在持久重试台账分配新次数之前暂停；退出 75
+保留缓存及旧失败次数。独立审核暂停标为 pending，不当作否定结论。只读预检
+可加手动测得的主机开销，明确不涵盖后续正文覆盖/审稿、输出预算或账户自动限流。
+不安装后台调度，不改变默认模型。兼容系统 Python 3.9。
+
+验证覆盖无上限旧行为、非法限制、到期时钟、暂停不新增尝试、恢复保留原失败、
+三次上限不可绕过、CLI 缓存落盘及预检不调用模型。339 项测试全部通过，Skill
+格式校验及 diff 检查通过；只更新升级分支，不据此合并 main 或同步安装目录。
+未运行真实模型、免费账户限流、长稿整集或 256K 验收，不将此补丁作为正式发布。
+
+English: Optional cooperative dispatch/time slices checkpoint before durable
+attempt allocation, preserving failures and caches. Read-only preflight includes
+explicit host-overhead estimates but is not automatic quota enforcement. This is
+offline verification, not real-model or full-episode acceptance.
+
+## 2026-11-05 近期 OpenClaw 任务检查与写作重试预算修复
+
+**331 项离线测试通过**，包括 5 项预算回归及真实派发路径的模拟重试检查；
+Skill 格式校验、diff 检查通过。使用 EP87 原有 18 个有效缓存片段只读重建规划：
+正文覆盖分成 2 个请求，42 个叶证据编号无遗漏/重复，最长基础请求 21642 字节，
+附诊断后 22039 字节；原状态 SHA-256 未变。此项使用真实输入但未调用模型，
+未执行语义审核、装配或最终验收，不是新的整集质量通过。尚未同步安装目录或推送。
+
+只读检查发现 EP87 的 36 个提取、11 个归纳均完成，但写作曾被 2.5 小时超时终止，
+随后出现 `23030 > 23000` 的本地提示预算错误。源代码规划允许 23000 字节基础请求，
+重试再追加诊断；这不是 API 请求失败。修复为基础请求最多 22000 字节，完整派发
+仍不超过 23000 字节；JSON 转义也计入诊断预算，完整原提示及证据不截断。
+旧近上限提示仅缩短/省略可选诊断，不清除任何失败计数或有效审核回执。
+
+No.302、No.306 已有写作草稿，但独立审核仍有待补证/未审核项，不能机械装配成
+完成报告。原作业仍为 awaiting_report，本轮未修改这些状态、报告或个人笔记。
+此次边界回归及全部离线检查见后续测试记录，不代表新的真实整集验收。
+
+English: Recent EP87 execution exposed a local 23030-byte retry prompt against a
+23000-byte dispatch ceiling. Writer planning now reserves 1000 bytes within that
+same ceiling; optional escaped diagnostics shrink, never original evidence.
+Historical attempts and judgments are untouched. Recent No.302/306 drafts still
+need independent reviews. No real-material provider switch or release acceptance
+is claimed by this offline fix.
+
 ## 2026-10-12 回查与恢复修复：局部实测仍未验收
 
 **325 项离线测试通过。** 新审核 `linear_source_grounding_v5` 按完整断言、数字和经过校验的叶证据定位原文，预留完整父片段上下文及 1K 错误反馈预算。原文不足时使用待补证状态，最多两轮真实新增原文的回查，并共享原三次协议调用上限。回查不改变稿件，不代替最终审核。

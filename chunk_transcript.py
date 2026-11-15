@@ -11,12 +11,122 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import math
 import re
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 
 SENTENCE_END_RE = re.compile(r"[。！？!?]\s*")
+
+
+def budget_chunks(
+    segments: Iterable[Mapping], target_tokens: int = 8000, model: str | None = None,
+    *, include_metadata: bool = False, max_segments: int | None = None,
+) -> dict:
+    """Pack ordered segments without changing their text or splitting them.
+
+    Each input must contain start, end and string text; extra fields and existing
+    IDs are preserved. Missing IDs use the zero-based source index and text hash.
+    Chunk source_hash is SHA-256 of primary texts joined with a single newline
+    (no stripping or normalization). Chunk IDs use chunk index and source_hash.
+
+    By default budget counts context and primary text joined with newlines.
+    include_metadata counts the serialized segment objects, including IDs/times.
+    Greedily pack primary segments first, then include the
+    complete immediately preceding source segment only if the combined text fits.
+    An available tiktoken encoding_for_model is used for recognized models only;
+    otherwise UTF-8 byte length is a conservative token upper bound.
+    """
+    if isinstance(target_tokens, bool) or not isinstance(target_tokens, int) or target_tokens <= 0:
+        raise ValueError("target_tokens must be a positive integer")
+    if max_segments is not None and (type(max_segments) is not int or max_segments <= 0):
+        raise ValueError("max_segments must be a positive integer")
+
+    estimator = "utf8_bytes_upper_bound"
+    encoding = None
+    if model is not None:
+        try:
+            import tiktoken
+        except ImportError:
+            pass
+        else:
+            try:
+                encoding = tiktoken.encoding_for_model(model)
+            except KeyError:
+                pass
+            else:
+                estimator = f"tiktoken:{encoding.name}"
+
+    def estimate(text: str) -> int:
+        if encoding is None:
+            return len(text.encode("utf-8"))
+        return len(encoding.encode(text, disallowed_special=()))
+
+    def source_text(items: list[dict]) -> str:
+        if include_metadata:
+            return json.dumps(items, ensure_ascii=False)
+        return "\n".join(item["text"] for item in items)
+
+    def text_hash(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    prepared = []
+    identifiers = set()
+    for index, segment in enumerate(segments):
+        if not isinstance(segment, Mapping) or not all(
+            key in segment for key in ("start", "end", "text")
+        ) or not isinstance(segment["text"], str):
+            raise ValueError(f"Segment {index} must contain start, end and string text")
+        item = dict(segment)
+        # IDs are stable within a source; full source/chunk hashes guard cross-source reuse.
+        item.setdefault("id", f"s{index:x}_{text_hash(item['text'])[:4]}")
+        if not isinstance(item["id"], str) or not item["id"] or item["id"] in identifiers:
+            raise ValueError(f"Segment {index} has an invalid or duplicate ID")
+        identifiers.add(item["id"])
+        size = estimate(source_text([item])) if include_metadata else estimate(item["text"])
+        if size > target_tokens:
+            raise ValueError(
+                f"Segment {index} ({item['id']}) requires {size} estimated tokens, "
+                f"exceeding target_tokens={target_tokens}; segments cannot be split"
+            )
+        prepared.append(item)
+
+    chunks = []
+    current = []
+    first_index = 0
+
+    def finish() -> None:
+        primary_text = "\n".join(item["text"] for item in current)
+        source_hash = text_hash(primary_text)
+        context = []
+        estimated_tokens = estimate(source_text(current))
+        if first_index > 0:
+            previous = prepared[first_index - 1]
+            with_context = estimate(source_text([previous] + current))
+            if with_context <= target_tokens:
+                context = [dict(previous)]
+                estimated_tokens = with_context
+        chunks.append({
+            "id": f"chunk_{len(chunks):06d}_{source_hash}",
+            "source_hash": source_hash,
+            "segments": current,
+            "context_segments": context,
+            "estimated_tokens": estimated_tokens,
+        })
+
+    for index, item in enumerate(prepared):
+        if current and ((max_segments is not None and len(current) >= max_segments)
+                        or estimate(source_text(current + [item])) > target_tokens):
+            finish()
+            current = []
+            first_index = index
+        current.append(item)
+    if current:
+        finish()
+    return {"estimator": estimator, "chunks": chunks}
 
 
 def split_paragraphs(text: str) -> list[str]:

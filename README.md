@@ -20,6 +20,15 @@ preserve what they heard without repeatedly scrubbing through the audio.
 它适合经常听长播客、需要检索观点、核对引述、整理知识或保存节目资料的人，
 能明显减少下载、转录、复制链接和手工归档的重复劳动。
 
+
+## Command-line preview / 命令行预览
+
+The image shows formatted output from `python3 podcast-listener.py --help`; it is not a transcription demo.
+
+下图为命令行帮助的实际输出，经排版展示；并非转录效果演示。
+
+![MOC Podcast Listener 命令行帮助输出](docs/images/cli-help.png)
+
 ## 中文简介
 
 MOC Podcast Listener 面向 Codex、OpenClaw 及其他支持 `SKILL.md` 的 Agent。
